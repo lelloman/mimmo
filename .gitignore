@@ -1,0 +1,26 @@
+# Training data (too large for git)
+data/
+*.tar.xz
+*.tar.gz
+
+# MusicBrainz dump metadata (extracted by accident)
+COPYING
+JSON_DUMPS_SCHEMA_NUMBER
+REPLICATION_SEQUENCE
+SCHEMA_SEQUENCE
+TIMESTAMP
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Rust
+target/
+Cargo.lock
+
+# Model weights
+*.safetensors
+*.bin
+*.gguf
