@@ -20,7 +20,15 @@ venv/
 target/
 Cargo.lock
 
-# Model weights
+# Model weights and artifacts
 *.safetensors
 *.bin
 *.gguf
+*.onnx
+
+# Training artifacts
+training/training_data_*.jsonl
+training/bert-classifier-*/checkpoint-*
+training/bert-classifier-*/runs/
+training/bert-classifier-*/onnx/
+training/bert-classifier-*/final/

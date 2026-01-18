@@ -159,7 +159,7 @@ def classify_ollama(prompt, model_name, timeout=60):
         "model": model_name,
         "prompt": prompt,
         "stream": False,
-        "options": {"temperature": 0.0, "num_predict": 20}
+        "options": {"temperature": 0.0, "num_predict": 20, "num_ctx": 2048}
     }).encode()
 
     try:
@@ -371,41 +371,202 @@ def label_with_model(conn, model_name, col_name, workers=4, use_openai=False):
     print(f"    Done: {completed} samples in {elapsed:.1f}s ({completed/elapsed:.1f} req/s)")
 
 
+def label_disagreements_with_qwen3coder(conn, workers=4, use_openai=True, batch="all"):
+    """Label only samples where 3 small models disagree.
+
+    Args:
+        use_openai: True for Strix Halo (OpenAI API), False for RTX (Ollama)
+        batch: "odd", "even", or "all" - allows splitting work between machines
+    """
+    # Get samples where all 3 small models have valid labels but don't all agree
+    base_query = """
+        SELECT id, name, files_json FROM samples
+        WHERE qwen IS NOT NULL AND gemma IS NOT NULL AND mistral IS NOT NULL
+        AND qwen IN ('music','video','software','book','porn','other')
+        AND gemma IN ('music','video','software','book','porn','other')
+        AND mistral IN ('music','video','software','book','porn','other')
+        AND qwen3coder IS NULL
+        AND NOT (qwen = gemma AND gemma = mistral)
+    """
+    if batch == "odd":
+        base_query += " AND id % 2 = 1"
+    elif batch == "even":
+        base_query += " AND id % 2 = 0"
+
+    cursor = conn.execute(base_query)
+    rows = cursor.fetchall()
+
+    if not rows:
+        print(f"  No disagreements to label with qwen3-coder")
+        return
+
+    api_type = "OpenAI (Strix Halo)" if use_openai else "Ollama (RTX)"
+    model_name = "qwen3-coder:30b"
+    print(f"  Labeling {len(rows)} disagreements ({batch}) with {model_name} via {api_type} (workers={workers})...")
+    start = time.time()
+    completed = 0
+
+    def process(row):
+        sid, name, files_json = row
+        prompt = build_prompt(name, files_json)
+        if use_openai:
+            label, elapsed = classify_openai(prompt)
+        else:
+            label, elapsed = classify_ollama(prompt, "qwen3-coder:30b")
+        return sid, label, elapsed
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {ex.submit(process, row): row for row in rows}
+        for future in as_completed(futures):
+            sid, label, elapsed = future.result()
+
+            # Retry on SQLite lock
+            for attempt in range(10):
+                try:
+                    conn.execute(
+                        "UPDATE samples SET qwen3coder = ?, qwen3coder_time = ? WHERE id = ?",
+                        (label, elapsed, sid)
+                    )
+                    conn.commit()
+                    break
+                except sqlite3.OperationalError:
+                    time.sleep(0.1 * (attempt + 1))
+
+            completed += 1
+            if completed % 100 == 0:
+                rate = completed / (time.time() - start)
+                remaining = (len(rows) - completed) / rate if rate > 0 else 0
+                print(f"    {completed}/{len(rows)} ({rate:.1f} req/s, ~{remaining/60:.1f}m left)")
+
+    elapsed = time.time() - start
+    print(f"    Done: {completed} samples in {elapsed:.1f}s ({completed/elapsed:.1f} req/s)")
+
+
+def label_disagreements_dual(conn, rtx_workers=4, halo_workers=4):
+    """Label disagreements using both RTX and Strix Halo in parallel.
+
+    Main thread handles DB, workers only do HTTP requests.
+    """
+    # Get samples where all 3 small models have valid labels but don't all agree
+    cursor = conn.execute("""
+        SELECT id, name, files_json FROM samples
+        WHERE qwen IS NOT NULL AND gemma IS NOT NULL AND mistral IS NOT NULL
+        AND qwen IN ('music','video','software','book','porn','other')
+        AND gemma IN ('music','video','software','book','porn','other')
+        AND mistral IN ('music','video','software','book','porn','other')
+        AND qwen3coder IS NULL
+        AND NOT (qwen = gemma AND gemma = mistral)
+    """)
+    rows = list(cursor.fetchall())
+
+    if not rows:
+        print(f"  No disagreements to label")
+        return
+
+    total = len(rows)
+    print(f"  Labeling {total} disagreements with qwen3-coder:30b via RTX ({rtx_workers}w) + Strix Halo ({halo_workers}w)...")
+
+    start = time.time()
+    completed = 0
+    rtx_count = 0
+    halo_count = 0
+
+    def process_rtx(row):
+        sid, name, files_json = row
+        prompt = build_prompt(name, files_json)
+        label, elapsed = classify_ollama(prompt, "qwen3-coder:30b")
+        return sid, label, elapsed, "rtx"
+
+    def process_halo(row):
+        sid, name, files_json = row
+        prompt = build_prompt(name, files_json)
+        label, elapsed = classify_openai(prompt)
+        return sid, label, elapsed, "halo"
+
+    # Use two thread pools, main thread collects results
+    with ThreadPoolExecutor(max_workers=rtx_workers) as rtx_pool, \
+         ThreadPoolExecutor(max_workers=halo_workers) as halo_pool:
+
+        # Submit all work - alternate between pools to balance initially
+        futures = []
+        for i, row in enumerate(rows):
+            if i % 2 == 0:
+                futures.append(rtx_pool.submit(process_rtx, row))
+            else:
+                futures.append(halo_pool.submit(process_halo, row))
+
+        # Main thread collects results and writes to DB
+        for future in as_completed(futures):
+            sid, label, elapsed, source = future.result()
+
+            # Save to DB (main thread only)
+            for attempt in range(10):
+                try:
+                    conn.execute(
+                        "UPDATE samples SET qwen3coder = ?, qwen3coder_time = ? WHERE id = ?",
+                        (label, elapsed, sid)
+                    )
+                    conn.commit()
+                    break
+                except sqlite3.OperationalError:
+                    time.sleep(0.1 * (attempt + 1))
+
+            completed += 1
+            if source == "rtx":
+                rtx_count += 1
+            else:
+                halo_count += 1
+
+            if completed % 100 == 0:
+                rate = completed / (time.time() - start)
+                remaining = (total - completed) / rate if rate > 0 else 0
+                print(f"    {completed}/{total} ({rate:.1f} req/s, ~{remaining/60:.1f}m left) [RTX:{rtx_count} Halo:{halo_count}]")
+
+    elapsed = time.time() - start
+    print(f"    Done: {completed} samples in {elapsed:.1f}s ({completed/elapsed:.1f} req/s)")
+    print(f"    RTX: {rtx_count}, Strix Halo: {halo_count}")
+
+
 def compute_consensus(conn):
-    """Compute consensus and majority vote labels for 4 models."""
+    """Compute consensus and majority vote labels.
+
+    Handles two cases:
+    1. All 3 small models agree -> consensus without needing qwen3coder
+    2. Disagreement with qwen3coder -> use majority voting
+    """
     from collections import Counter
     cursor = conn.cursor()
 
-    # Get all samples with all 4 labels
+    # Get all samples with at least 3 small model labels
     cursor.execute("""
         SELECT id, qwen, gemma, mistral, qwen3coder FROM samples
-        WHERE qwen IS NOT NULL AND gemma IS NOT NULL
-          AND mistral IS NOT NULL AND qwen3coder IS NOT NULL
+        WHERE qwen IS NOT NULL AND gemma IS NOT NULL AND mistral IS NOT NULL
     """)
 
     for row in cursor.fetchall():
         sid, qwen, gemma, mistral, qwen3coder = row
 
-        # Filter valid labels
-        labels = [l for l in [qwen, gemma, mistral, qwen3coder] if l in CATEGORIES]
+        # Filter valid small model labels
+        small_labels = [l for l in [qwen, gemma, mistral] if l in CATEGORIES]
 
         consensus = None
         majority = None
 
-        if len(labels) == 4:
-            if labels[0] == labels[1] == labels[2] == labels[3]:
-                # All 4 agree
-                consensus = labels[0]
-                majority = labels[0]
-            else:
-                # Find majority (3+ or most common with 2+)
-                counts = Counter(labels)
+        if len(small_labels) == 3:
+            if small_labels[0] == small_labels[1] == small_labels[2]:
+                # All 3 small models agree - consensus!
+                consensus = small_labels[0]
+                majority = small_labels[0]
+            elif qwen3coder and qwen3coder in CATEGORIES:
+                # Disagreement among small models, use qwen3coder to break tie
+                all_labels = small_labels + [qwen3coder]
+                counts = Counter(all_labels)
                 most_common = counts.most_common(1)[0]
                 if most_common[1] >= 3:
                     # 3v1 split - use majority
                     majority = most_common[0]
                 elif most_common[1] == 2:
-                    # 2v2 or 2v1v1 - check if there's a clear 2v2
+                    # Check for 2v2 vs 2v1v1
                     top_two = counts.most_common(2)
                     if len(top_two) >= 2 and top_two[1][1] == 2:
                         # 2v2 split - no clear majority
@@ -486,18 +647,35 @@ def print_stats(conn):
 
 
 def export_training_data(conn, output_file, use_majority=True):
-    """Export labeled data for BERT training."""
+    """Export labeled data for BERT training.
+
+    Combines torrent name with top 3 biggest files for richer context.
+    """
     label_col = "majority" if use_majority else "consensus"
 
     cursor = conn.execute(f"""
-        SELECT name, {label_col} FROM samples
+        SELECT name, files_json, {label_col} FROM samples
         WHERE {label_col} IS NOT NULL
     """)
 
     count = 0
     with open(output_file, 'w', encoding='utf-8') as f:
-        for name, label in cursor:
-            f.write(json.dumps({"text": name, "label": label}, ensure_ascii=False) + '\n')
+        for name, files_json, label in cursor:
+            # Parse files and get top 3 biggest
+            try:
+                files = json.loads(files_json) if files_json else []
+            except json.JSONDecodeError:
+                files = []
+
+            # Build text: name + top 3 file names
+            # files format: [[size, filename], [size, filename], ...]
+            if files:
+                top_file_names = [f[1] for f in files[:3]]
+                text = f"{name} | {' | '.join(top_file_names)}"
+            else:
+                text = name
+
+            f.write(json.dumps({"text": text, "label": label}, ensure_ascii=False) + '\n')
             count += 1
 
     print(f"Exported {count} samples to {output_file}")
@@ -517,8 +695,12 @@ def main():
                        help="Parallel workers for LLM requests (4 optimal for RTX)")
     parser.add_argument("--skip-sampling", action="store_true",
                        help="Skip sampling, continue from existing database")
-    parser.add_argument("--model", choices=["qwen", "gemma", "mistral", "qwen3coder", "small3", "all"],
-                       default="all", help="Which model(s) to run")
+    parser.add_argument("--model", choices=[
+        "qwen", "gemma", "mistral", "qwen3coder", "small3", "all", "gemma-halo",
+        "qwen3coder-disagree", "qwen3coder-disagree-rtx", "qwen3coder-disagree-dual",
+        "qwen3coder-disagree-halo-odd", "qwen3coder-disagree-halo-even",
+        "qwen3coder-disagree-rtx-odd", "qwen3coder-disagree-rtx-even"
+    ], default="all", help="Which model(s) to run")
     parser.add_argument("--export", action="store_true",
                        help="Export training data after labeling")
     parser.add_argument("--stats", action="store_true",
@@ -529,6 +711,14 @@ def main():
 
     if args.stats:
         print_stats(conn)
+        conn.close()
+        return
+
+    if args.export:
+        # Export only - don't run any labeling
+        compute_consensus(conn)
+        export_file = OUTPUT_DB.parent / "training_data_consensus.jsonl"
+        export_training_data(conn, export_file, use_majority=True)
         conn.close()
         return
 
@@ -566,6 +756,38 @@ def main():
         # Run only big model (Strix Halo)
         model_name, col_name = BIG_MODEL
         label_with_model(conn, model_name, col_name, args.workers, use_openai=True)
+
+    elif args.model == "qwen3coder-disagree":
+        # Run big model only on samples where 3 small models disagree (Strix Halo)
+        label_disagreements_with_qwen3coder(conn, args.workers, use_openai=True, batch="all")
+
+    elif args.model == "qwen3coder-disagree-rtx":
+        # Run big model only on samples where 3 small models disagree (RTX Ollama)
+        label_disagreements_with_qwen3coder(conn, args.workers, use_openai=False, batch="all")
+
+    elif args.model == "qwen3coder-disagree-dual":
+        # Run big model on both RTX and Strix Halo in parallel
+        label_disagreements_dual(conn, rtx_workers=4, halo_workers=4)
+
+    elif args.model == "qwen3coder-disagree-halo-odd":
+        # Run on Strix Halo for odd IDs only
+        label_disagreements_with_qwen3coder(conn, args.workers, use_openai=True, batch="odd")
+
+    elif args.model == "qwen3coder-disagree-halo-even":
+        # Run on Strix Halo for even IDs only
+        label_disagreements_with_qwen3coder(conn, args.workers, use_openai=True, batch="even")
+
+    elif args.model == "qwen3coder-disagree-rtx-odd":
+        # Run on RTX for odd IDs only (qwen2.5-coder:32b via Ollama)
+        label_disagreements_with_qwen3coder(conn, args.workers, use_openai=False, batch="odd")
+
+    elif args.model == "qwen3coder-disagree-rtx-even":
+        # Run on RTX for even IDs only (qwen2.5-coder:32b via Ollama)
+        label_disagreements_with_qwen3coder(conn, args.workers, use_openai=False, batch="even")
+
+    elif args.model == "gemma-halo":
+        # Run gemma on Strix Halo via OpenAI API
+        label_with_model(conn, "gemma-3-4b-it", "gemma", args.workers, use_openai=True)
 
     else:
         # Run single small model
