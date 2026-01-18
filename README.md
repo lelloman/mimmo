@@ -2,193 +2,158 @@
 
 **Media Intelligence Metadata Modeling Outlet**
 
-A two-stage pipeline for torrent content classification and music metadata extraction:
-1. **Content Classifier** (BERT) - Fast content type detection
-2. **Music Extractor** (LLM) - Detailed metadata extraction for music
-3. **Name Matcher** (LLM) - Fuzzy artist/album matching
+A Rust library and CLI for torrent content classification. Classifies torrents into media types (audio, video, software, book, other) with subcategory detection for audio/video content.
 
-Single binary, no dependencies, CPU inference.
+Single binary, no dependencies, CPU inference via embedded ONNX model.
 
-## Architecture
-
-```
-                    ┌─────────────────┐
-                    │  Torrent Input  │
-                    │  name + files   │
-                    └────────┬────────┘
-                             │
-                             ▼
-                    ┌─────────────────┐
-                    │  BERT Classifier│  ← Stage 1: Content Type
-                    │  (~4MB, <1ms)   │
-                    └────────┬────────┘
-                             │
-        ┌────────────────────┼────────────────────┐
-        │                    │                    │
-        ▼                    ▼                    ▼
-    ┌───────┐           ┌───────┐           ┌───────┐
-    │ music │           │ movie │           │ other │
-    └───┬───┘           └───────┘           └───────┘
-        │                   │                   │
-        ▼                   ▼                   ▼
-┌───────────────┐       (skip)              (skip)
-│ LLM Extractor │  ← Stage 2: Metadata
-│ Qwen2.5-0.5B  │
-└───────────────┘
-        │
-        ▼
-┌───────────────┐
-│ {artist, album│
-│  year, tracks}│
-└───────────────┘
-```
-
-## CLI Interface
+## Installation
 
 ```bash
-# Classify content type (Stage 1 only)
-mimmo content-type "Pink Floyd - Dark Side of the Moon [FLAC]"
-{"type": "music", "confidence": 0.98}
-
-# Full extraction (Stage 1 + Stage 2)
-mimmo extract < tree.txt
-{
-  "content_type": "music",
-  "music_type": "album",
-  "artist": "Pink Floyd",
-  "album": "The Dark Side of the Moon",
-  "year": 1973,
-  "tracks": [
-    {"num": 1, "name": "Speak to Me"},
-    {"num": 2, "name": "Breathe"},
-    ...
-  ]
-}
-
-# Name matching
-mimmo match artist "GNR" "Guns N' Roses"
-{"match": true, "confidence": 0.92}
-
-mimmo match album "DSOTM" "The Dark Side of the Moon"
-{"match": true, "confidence": 0.96}
+cargo install mimmo
 ```
 
-## Models
+Or build from source:
+```bash
+git clone https://github.com/lelloman/mimmo
+cd mimmo
+cargo build --release
+```
 
-| Model | Task | Base | Size | Latency |
-|-------|------|------|------|---------|
-| Content Classifier | music/video/software/etc | BERT-tiny | ~4MB | <1ms |
-| Music Extractor | artist/album/year/tracks | Qwen2.5-0.5B | ~300MB | <1s |
-| Name Matcher | artist/album fuzzy match | Qwen2.5-0.5B | (shared) | <200ms |
+## CLI Usage
 
-## Content Types
+```bash
+# Classify a torrent file
+mimmo /path/to/file.torrent
 
-The classifier detects:
-- `music` - Albums, discographies, singles
-- `video` - Films, TV series, documentaries, anime
-- `software` - Applications, games, tools
-- `book` - Ebooks, audiobooks, comics
-- `porn` - Adult content
-- `other` - Unclassified
+# Classify a directory
+mimmo /path/to/extracted/torrent/
 
-## Project Phases
+# Classify an archive
+mimmo album.zip
+mimmo release.tar.gz
 
-### Phase 1: Data Collection ✅
-- [x] Download Magnetico DHT dump (32.5M torrents)
-- [x] Download MusicBrainz JSON dumps (artist + release-group)
+# Classify raw text
+mimmo "Pink Floyd - Dark Side of the Moon [FLAC]"
 
-### Phase 2: Training Data Preparation
-- [ ] **Content Classifier Data**
-  - [ ] Sample 50k torrents from DHT dump
-  - [ ] Label with 4 LLM consensus voting (qwen2.5:3b, gemma3:4b, mistral:7b, qwen3-coder:30b)
-  - [ ] All 4 agree (~60%) = high confidence, 3v1 (~27%) = majority vote
-  - [ ] Output: `training_data_consensus.jsonl` (~43k usable samples)
-- [ ] **Music Metadata Data**
-  - [ ] Filter music torrents (audio file extensions)
-  - [ ] Label with LLM: artist, album, year, tracks
-  - [ ] Output: `music_metadata.jsonl` (~50k samples)
-- [ ] **Name Matching Data** ✅
-  - [x] Extract MusicBrainz artist aliases → `artist_pairs.jsonl` (10k)
-  - [x] Extract MusicBrainz album variations → `album_pairs.jsonl` (10k)
+# Pipe input
+echo "Game of Thrones S01 Complete 1080p" | mimmo
+```
 
-### Phase 3: Model Training
-- [ ] **BERT Content Classifier**
-  - [ ] Fine-tune `prajjwal1/bert-tiny` or `distilbert-base-uncased`
-  - [ ] Target: >95% accuracy on content type
-  - [ ] Export to ONNX or Safetensors
-- [ ] **LLM Music Extractor**
-  - [ ] Fine-tune Qwen2.5-0.5B with LoRA
-  - [ ] Constrained JSON output
-  - [ ] Target: >90% field accuracy
-- [ ] **LLM Name Matcher** (optional separate training)
-  - [ ] May share weights with extractor
+Output is JSON:
+```json
+{"medium":"audio","subcategory":"album","confidence":0.9706}
+{"medium":"video","subcategory":"season","confidence":0.9512}
+{"medium":"software","confidence":0.8834}
+```
 
-### Phase 4: Rust Binary
-- [ ] Integrate BERT inference (candle or ort)
-- [ ] Integrate LLM inference (candle)
-- [ ] CLI implementation
-- [ ] Single binary packaging
-- [ ] Cross-compilation
+## Library Usage
 
-## Training Data Sources
+```rust
+use mimmo::{Classifier, from_torrent, from_path};
 
-| Source | Data | Use |
-|--------|------|-----|
-| [Magnetico DHT dump](https://tnt.maiti.info/dhtd/) | 32.5M torrents | Content classification, music extraction |
-| [MusicBrainz](https://musicbrainz.org/doc/MusicBrainz_Database/Download) | Artist/album data | Name matching pairs |
+let mut classifier = Classifier::new()?;
+
+// From torrent file
+let info = from_torrent("/path/to/file.torrent")?;
+let result = classifier.classify(&info)?;
+
+// From any supported path (auto-detects type)
+let info = from_path("/path/to/content")?;
+let result = classifier.classify(&info)?;
+
+println!("{} ({:.1}%)", result.medium, result.confidence * 100.0);
+if let Some(sub) = result.subcategory {
+    println!("Subcategory: {}", sub);
+}
+```
+
+## Classification
+
+### Medium Types
+
+| Medium | Description |
+|--------|-------------|
+| `audio` | Music albums, tracks, discographies |
+| `video` | Movies, TV series, documentaries |
+| `software` | Applications, games, operating systems |
+| `book` | Ebooks, PDFs, comics |
+| `other` | Unclassified content |
+
+### Subcategories
+
+For audio and video content, structural analysis determines subcategory:
+
+**Audio:**
+| Subcategory | Detection |
+|-------------|-----------|
+| `track` | Single audio file |
+| `album` | Multiple audio files in one directory |
+| `collection` | Multiple audio files across multiple directories |
+
+**Video:**
+| Subcategory | Detection |
+|-------------|-----------|
+| `movie` | Single video file (no episode pattern) |
+| `episode` | Single video file with S01E01/1x01 pattern |
+| `season` | Multiple video files in one directory |
+| `series` | Multiple video files across multiple directories |
+
+## Supported Input Formats
+
+- Torrent files (`.torrent`)
+- Directories
+- Zip archives (`.zip`, `.cbz`, `.epub`, `.jar`, `.apk`)
+- Tar archives (`.tar`, `.tar.gz`, `.tgz`, `.tar.xz`, `.txz`)
+- Raw text (torrent name)
+
+## Model
+
+The classifier uses a fine-tuned BERT-tiny model (~4MB) embedded in the binary:
+- Base: `prajjwal1/bert-tiny`
+- Training: ~10k samples with 4-LLM consensus voting
+- Accuracy: ~92% on held-out test set
+- Inference: <10ms per sample on CPU
+
+## Project Status
+
+### Completed
+- [x] Medium classification (audio/video/software/book/other)
+- [x] Subcategory detection (album/track/collection, movie/episode/season/series)
+- [x] Rust library with public API
+- [x] CLI binary
+- [x] ONNX model inference
+
+### Planned
+- [ ] Metadata extraction (title, artist, year, etc.)
+- [ ] Technical metadata (codec, bitrate, resolution)
 
 ## Repository Structure
 
 ```
 mimmo/
-├── README.md
+├── src/
+│   ├── lib.rs              # Library with public API
+│   └── main.rs             # CLI binary
 ├── training/
-│   ├── consensus_labeler.py        # 4-LLM consensus labeling for BERT data
-│   ├── extract_artist_pairs.py     # MusicBrainz → artist pairs
-│   ├── extract_album_pairs.py      # MusicBrainz → album pairs
-│   ├── extract_music_torrents.py   # DHT → music samples
-│   ├── extract_content_samples.py  # DHT → content type samples
-│   ├── train_classifier.py         # BERT training (TODO)
-│   └── train_extractor.py          # LLM fine-tuning (TODO)
-├── data/                           # Training data (gitignored)
-├── prompts/                        # LLM prompt templates
-├── ai_torrent_analyzer.py          # Manual testing tool
-├── dht_search.py                   # DHT database search
-└── dht_search_tui.py               # TUI for DHT search
+│   ├── consensus_labeler.py    # 4-LLM consensus labeling
+│   ├── train_classifier.py     # BERT training script
+│   └── bert-classifier-medium/ # Trained model
+├── Cargo.toml
+└── README.md
 ```
 
-## Labeling Infrastructure
+## Training Data
 
-The content classifier training data is generated using multi-LLM consensus voting:
+Content classifier training data is generated using multi-LLM consensus voting:
 
-**Models:**
-- 3 small models on RTX 4090 via Ollama: qwen2.5:3b, gemma3:4b, mistral:7b
-- 1 large model on Strix Halo via OpenAI API: qwen3-coder:30b
+**Models:** qwen2.5:3b, gemma3:4b, mistral:7b, qwen3-coder:30b
 
-**Performance (benchmarked on 1000 samples):**
-- RTX Ollama: ~31 req/s with 4 workers
-- Strix Halo OpenAI: ~4 req/s
-- All 4 agree: ~60% of samples
-- 3v1 majority: ~27% additional samples
-- Total usable: ~87% of samples
+**Consensus rules:**
+- All 4 agree (~60%) = high confidence label
+- 3v1 majority (~27%) = majority vote label
+- 2v2 split = discarded
 
-**Usage:**
-```bash
-# Full run: sample and label with all 4 models
-python training/consensus_labeler.py -n 50000
-
-# Run 3 small models only (RTX)
-python training/consensus_labeler.py --skip-sampling --model small3
-
-# Run big model only (Strix Halo)
-python training/consensus_labeler.py --skip-sampling --model qwen3coder
-
-# Check progress
-python training/consensus_labeler.py --stats
-
-# Export training data
-python training/consensus_labeler.py --export
-```
+**Data source:** [Magnetico DHT dump](https://tnt.maiti.info/dhtd/) (32.5M torrents)
 
 ## License
 

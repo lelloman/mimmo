@@ -8,10 +8,21 @@ Extract structured metadata from torrent content based on medium type and subcat
 
 ### Video
 
-**video/movie, video/episode:**
+**video/movie:**
 ```json
 {
   "title": "string (required)",
+  "year": "number (optional)"
+}
+```
+
+**video/episode:**
+```json
+{
+  "title": "string (required)",
+  "series_title": "string (optional)",
+  "season_number": "number (optional)",
+  "episode_number": "number (optional)",
   "year": "number (optional)"
 }
 ```
@@ -63,33 +74,43 @@ Extract structured metadata from torrent content based on medium type and subcat
 }
 ```
 
-### Technical Metadata (all media types)
+### Technical Metadata (all audio/video types)
 
 ```json
 {
   "containers": "string[] (required)",
   "codec": "string (optional)",
-  "bitrate": "string (optional)"
+  "bitrate": "string (optional)",
+  "resolution": "string (optional)"
 }
 ```
 
 ## Implementation Approach
 
-### Technical Metadata (Heuristics)
+### Technical Metadata (Heuristics - Rust)
 
-- **Containers**: Extract from file extensions (mkv, mp4, avi, flac, mp3, etc.)
-- **Codec**: Parse from filename patterns (x264, x265, HEVC, AV1, FLAC, AAC, etc.)
-- **Bitrate**: Parse from filename patterns (320, 192, 24bit, 16bit, etc.)
+Can be extracted from filenames using pattern matching:
+
+- **Containers**: File extensions (mkv, mp4, avi, flac, mp3, etc.)
+- **Codec**: Filename patterns (x264, x265, HEVC, AV1, FLAC, AAC, etc.)
+- **Bitrate**: Filename patterns (320, 192, 24bit, 16bit, V0, etc.)
+- **Resolution**: Filename patterns (1080p, 720p, 4K, 2160p, etc.)
 
 ### Content Metadata (ML/LLM)
 
-TBD - Options:
-1. Fine-tune a model for structured extraction
-2. Use LLM with JSON schema prompting for labeling, then train smaller model
-3. Rule-based extraction with regex fallbacks
+Options:
+1. **LLM labeling → train smaller model**: Use LLM with JSON schema prompting to label dataset, then fine-tune a small model for extraction
+2. **Direct LLM inference**: Use small LLM (Qwen2.5-0.5B) embedded in binary for extraction
+3. **Hybrid**: Regex extraction for common patterns, LLM for ambiguous cases
+
+## Implementation Order
+
+1. [ ] Technical metadata extraction (heuristics in Rust)
+2. [ ] Content metadata labeling pipeline (LLM)
+3. [ ] Content metadata model training or integration
 
 ## Open Questions
 
-- [ ] How to handle content metadata extraction? (ML approach TBD)
 - [ ] Should software and book types have metadata schemas?
-- [ ] Video resolution as technical metadata? (1080p, 4K, etc.)
+- [ ] For audio/collection, how to handle Various Artists compilations?
+- [ ] video/episode: Is series context always derivable from filename, or should we just extract title?
