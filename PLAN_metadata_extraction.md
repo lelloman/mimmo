@@ -19,10 +19,10 @@ Extract structured metadata from torrent content based on medium type and subcat
 **video/episode:**
 ```json
 {
-  "title": "string (required)",
-  "series_title": "string (optional)",
-  "season_number": "number (optional)",
-  "episode_number": "number (optional)",
+  "series_title": "string (required)",
+  "episode_title": "string (optional)",
+  "season_number": "number (optional) - HEURISTIC: extracted via regex (S01E01, 1x01)",
+  "episode_number": "number (optional) - HEURISTIC: extracted via regex (S01E01, 1x01)",
   "year": "number (optional)"
 }
 ```
@@ -30,8 +30,8 @@ Extract structured metadata from torrent content based on medium type and subcat
 **video/season:**
 ```json
 {
-  "show_name": "string (required)",
-  "season_number": "number (required)",
+  "series_title": "string (required)",
+  "season_number": "number (optional) - HEURISTIC: extracted via regex or directory structure",
   "year": "number (optional)"
 }
 ```
@@ -39,8 +39,7 @@ Extract structured metadata from torrent content based on medium type and subcat
 **video/series:**
 ```json
 {
-  "show_name": "string (required)",
-  "season_count": "number (required)"
+  "series_title": "string (required)"
 }
 ```
 
@@ -113,4 +112,85 @@ Options:
 
 - [ ] Should software and book types have metadata schemas?
 - [ ] For audio/collection, how to handle Various Artists compilations?
-- [ ] video/episode: Is series context always derivable from filename, or should we just extract title?
+
+---
+
+## Entity Extraction Model Evaluation (2025-01-18)
+
+### Models Tested
+
+| Model | Params | Speed | Quality |
+|-------|--------|-------|---------|
+| **GLiNER multi-v2.1** | 209M | ~13/sec (75ms) | Good for audio, mixed for video |
+| **NuExtract 4B** | 3.8B | ~0.5/sec (2000ms) | Better semantic understanding |
+| **NuExtract-tiny** | 464M | ~0.9/sec (1100ms) | Poor - hallucinations, confusion |
+
+### GLiNER Findings
+
+**Audio extraction** (good):
+- Artist/album/year extraction works well with `"Artist - Album (Year)"` format
+- Examples: `Kathryn Williams - 2004 - Relations` → artist, year, album correctly extracted
+- Struggles with ambiguous single names (e.g., "LA FLOA MALDITA" → extracted as album, but it's artist)
+
+**Video extraction** (mixed):
+- Title extraction often includes too much (e.g., whole torrent name)
+- Season/episode parsing inconsistent (S05E16 sometimes in season field, episode number in another)
+- Confuses names with metadata (e.g., "Autumn Falls" person name → season: "Autumn", episode: "Falls")
+- Resolution/codec extraction works reasonably well
+
+### NuExtract Findings
+
+**4B version** (better quality, too slow):
+- Better semantic understanding - correctly identified "Felina" as episode title (Breaking Bad finale)
+- Understands context better than GLiNER
+- JSON schema output is cleaner
+- 20-25x slower than GLiNER - not practical for bulk labeling
+
+**Tiny version** (not recommended):
+- Frequent hallucinations (generated unrelated text about Billboard Hot 100)
+- Confused field mappings worse than GLiNER
+- Slower than GLiNER despite being smaller
+
+### Performance Summary
+
+For labeling 100k samples:
+- **GLiNER**: ~2 hours
+- **NuExtract 4B**: ~56 hours
+- **NuExtract-tiny**: ~31 hours (with poor quality)
+
+### Mimmo Classification Speed
+
+| Method | Speed | Per Sample |
+|--------|-------|------------|
+| Mimmo binary (direct) | ~1470/sec | 0.68ms |
+| Mimmo via subprocess | ~5.7/sec | 175ms |
+
+Classification is essentially instant compared to extraction.
+
+### Conclusions
+
+1. **GLiNER is the best option** for bulk labeling due to speed
+2. **Quality is acceptable** but not perfect - fine for training data generation
+3. **Heuristic extraction** (Rust regex, no ML needed):
+   - Technical: resolution, codec, bitrate, containers
+   - Video: season_number, episode_number (S01E01 patterns)
+4. **ML extraction** (needs NER/model):
+   - Video: series_title, episode_title, movie title, year
+   - Audio: artist, album, track_name, year
+
+### Recommended Approach
+
+**Option A: Distillation Pipeline**
+1. Use GLiNER to label 100k+ samples
+2. Train smaller token classifier (~50M params) on those labels
+3. Embed in mimmo binary
+
+**Option B: Hybrid Regex + Optional ML**
+1. Implement regex extraction for technical metadata in Rust
+2. Keep semantic extraction as optional Python/GLiNER dependency
+3. Simpler, but no embedded extraction
+
+**Option C: Use LLM for Higher Quality Labels**
+1. Use local LLM (qwen2.5:3b) for labeling instead of GLiNER
+2. Slower but potentially better quality training data
+3. Then distill to smaller model
