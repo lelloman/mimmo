@@ -1,7 +1,13 @@
 //! Mimmo - Torrent content classifier
 //!
-//! A BERT-based classifier that predicts the media type of torrent content
-//! based on the torrent name and file listing.
+//! A cascade-based classifier that predicts the media type of torrent content
+//! using a combination of heuristics and ML fallback.
+//!
+//! # Architecture
+//!
+//! The classifier uses a cascade approach:
+//! 1. Fast heuristic stages (file extensions, name patterns)
+//! 2. ML fallback for ambiguous cases
 //!
 //! # Example
 //!
@@ -36,6 +42,9 @@ use xz2::read::XzDecoder;
 use zip::ZipArchive;
 
 pub use error::Error;
+
+// Cascade classification system
+pub mod cascade;
 
 mod error {
     use std::fmt;
@@ -145,8 +154,10 @@ pub struct ClassificationResult {
 
 /// The main classifier
 pub struct Classifier {
-    session: Session,
-    tokenizer: Tokenizer,
+    /// ONNX inference session
+    pub session: Session,
+    /// Tokenizer for text encoding
+    pub tokenizer: Tokenizer,
 }
 
 impl Classifier {
