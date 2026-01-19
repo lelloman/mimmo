@@ -466,7 +466,8 @@ fn analyze_structure(info: &ContentInfo, is_video: bool) -> MediaStructure {
     }
 }
 
-fn detect_subcategory(medium: &str, info: &ContentInfo) -> &'static str {
+/// Detect subcategory for audio/video content based on file structure.
+pub fn detect_subcategory(medium: &str, info: &ContentInfo) -> &'static str {
     let is_video = medium == "video";
     let structure = analyze_structure(info, is_video);
 

@@ -1,5 +1,5 @@
 use mimmo::cascade::{Cascade, Confidence, Medium, StageResult};
-use mimmo::{from_path, from_text, Classifier, ClassificationResult};
+use mimmo::{from_path, from_text, detect_subcategory, ContentInfo};
 use serde::Serialize;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
@@ -10,53 +10,42 @@ struct JsonResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     subcategory: Option<&'static str>,
     confidence: f32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    source: Option<&'static str>,
+    source: &'static str,
 }
 
-impl From<&ClassificationResult> for JsonResult {
-    fn from(r: &ClassificationResult) -> Self {
-        JsonResult {
-            medium: r.medium,
-            subcategory: r.subcategory,
-            confidence: (r.confidence * 10000.0).round() / 10000.0,
-            source: None,
-        }
-    }
-}
-
-impl From<&StageResult> for JsonResult {
-    fn from(r: &StageResult) -> Self {
-        let confidence = match r.confidence {
-            Confidence::High => 0.95,
-            Confidence::Medium => 0.75,
-            Confidence::Low => 0.50,
-        };
-        let medium = match r.medium {
-            Medium::Video => "video",
-            Medium::Audio => "audio",
-            Medium::Book => "book",
-            Medium::Software => "software",
-            Medium::Other => "other",
-        };
-        JsonResult {
-            medium,
-            subcategory: None,
-            confidence,
-            source: Some(r.source),
-        }
+fn stage_result_to_json(r: &StageResult, info: &ContentInfo) -> JsonResult {
+    let confidence = match r.confidence {
+        Confidence::High => 0.95,
+        Confidence::Medium => 0.75,
+        Confidence::Low => 0.50,
+    };
+    let medium = match r.medium {
+        Medium::Video => "video",
+        Medium::Audio => "audio",
+        Medium::Book => "book",
+        Medium::Software => "software",
+        Medium::Other => "other",
+    };
+    let subcategory = if medium == "audio" || medium == "video" {
+        Some(detect_subcategory(medium, info))
+    } else {
+        None
+    };
+    JsonResult {
+        medium,
+        subcategory,
+        confidence,
+        source: r.source,
     }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
 
-    // Check for flags
-    let use_cascade = args.iter().any(|a| a == "--cascade" || a == "-c");
     let interactive = args.iter().any(|a| a == "-i");
 
     if interactive {
-        return interactive_mode(use_cascade);
+        return interactive_mode();
     }
 
     // Get non-flag arguments
@@ -79,13 +68,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     if raw_input.is_empty() {
-        eprintln!("Usage: mimmo [--cascade|-c] <path|text>");
+        eprintln!("Usage: mimmo <path|text>");
         eprintln!("   or: echo <text> | mimmo");
-        eprintln!("   or: mimmo -i [--cascade]  (interactive JSON batch mode)");
+        eprintln!("   or: mimmo -i  (interactive JSON batch mode)");
         eprintln!();
         eprintln!("Options:");
-        eprintln!("  -c, --cascade  Use cascade classifier (heuristics + ML fallback)");
-        eprintln!("  -i             Interactive JSON batch mode");
+        eprintln!("  -i  Interactive JSON batch mode");
         eprintln!();
         eprintln!("Supported inputs:");
         eprintln!("  - Directory path");
@@ -108,15 +96,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Classify
-    let json_result = if use_cascade {
-        let cascade = Cascade::default_with_ml()?;
-        let result = cascade.classify(&content_info)?;
-        JsonResult::from(&result)
-    } else {
-        let mut classifier = Classifier::new()?;
-        let result = classifier.classify(&content_info)?;
-        JsonResult::from(&result)
-    };
+    let cascade = Cascade::default_with_ml()?;
+    let result = cascade.classify(&content_info)?;
+    let json_result = stage_result_to_json(&result, &content_info);
 
     // Output JSON
     println!("{}", serde_json::to_string(&json_result)?);
@@ -124,17 +106,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-enum ClassifierMode {
-    Direct(Classifier),
-    Cascade(Cascade),
-}
-
-fn interactive_mode(use_cascade: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let mode = if use_cascade {
-        ClassifierMode::Cascade(Cascade::default_with_ml()?)
-    } else {
-        ClassifierMode::Direct(Classifier::new()?)
-    };
+fn interactive_mode() -> Result<(), Box<dyn std::error::Error>> {
+    let cascade = Cascade::default_with_ml()?;
 
     let stdin = io::stdin();
     let mut stdout = io::stdout();
@@ -164,20 +137,8 @@ fn interactive_mode(use_cascade: bool) -> Result<(), Box<dyn std::error::Error>>
                 from_text(input)
             };
 
-            let json_result = match &mode {
-                ClassifierMode::Cascade(cascade) => {
-                    let result = cascade.classify(&content_info)?;
-                    JsonResult::from(&result)
-                }
-                ClassifierMode::Direct(classifier) => {
-                    // Note: classify needs &mut self, but we don't have that here
-                    // For now, use cascade in interactive mode with --cascade flag
-                    let mut c = Classifier::new()?;
-                    let result = c.classify(&content_info)?;
-                    JsonResult::from(&result)
-                }
-            };
-            results.push(json_result);
+            let result = cascade.classify(&content_info)?;
+            results.push(stage_result_to_json(&result, &content_info));
         }
 
         // Output JSON array of results
