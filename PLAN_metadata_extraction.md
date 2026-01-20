@@ -85,34 +85,81 @@ Extract structured metadata from torrent content based on medium type and subcat
 
 ## Implementation Approach
 
-### Heuristic Extraction (Rust regex, no ML needed)
+### Cascade Extraction Pipeline
 
-Can be extracted from filenames/structure using pattern matching:
+To avoid false positives (e.g., matching "English" in a title as a language), we use a cascade:
 
-**Technical metadata:**
+```
+Input: "Pink Floyd - Dark Side of the Moon (1973) [FLAC 24bit 1080p] MULTI"
+                              │
+                              ▼
+                   ┌─────────────────────┐
+                   │  1. ML Extraction   │
+                   │  (title, artist,    │
+                   │   album, year)      │
+                   └─────────────────────┘
+                              │
+          Extracted: "Pink Floyd", "Dark Side of the Moon", "1973"
+                              │
+                              ▼
+                   ┌─────────────────────┐
+                   │  2. Remove ML spans │
+                   │  from input         │
+                   └─────────────────────┘
+                              │
+          Remaining: " -  () [FLAC 24bit 1080p] MULTI"
+                              │
+                              ▼
+                   ┌─────────────────────┐
+                   │  3. Regex Extraction│
+                   │  (technical metadata│
+                   │   on remainder)     │
+                   └─────────────────────┘
+                              │
+          Extracted: codec=FLAC, bitrate=24bit, resolution=1080p, audio_languages=[MULTI]
+```
+
+### Step 1: Content Metadata (ML)
+
+Extract semantic content first:
+- **Video**: title, series_title, year
+- **Audio**: artist, album, album_name, track_name, year, collection_name, artists[]
+
+### Step 2: Remove ML Spans
+
+Remove the extracted content spans from the input text, leaving only the technical "cruft".
+
+### Step 3: Technical Metadata (Regex on remainder)
+
+Pattern matching on the remaining text:
+
+**From filenames/structure:**
 - **Containers**: File extensions (mkv, mp4, avi, flac, mp3, etc.)
-- **Codec**: Filename patterns (x264, x265, HEVC, AV1, FLAC, AAC, etc.)
-- **Bitrate**: Filename patterns (320, 192, 24bit, 16bit, V0, etc.)
-- **Resolution**: Filename patterns (1080p, 720p, 4K, 2160p, etc.)
-- **Audio languages**: Filename patterns (English, ENG, MULTI, DUAL, Spanish, etc.)
-- **Subtitle languages**: Filename patterns (SUBS, .srt files, English.srt, etc.)
-
-**Content metadata (heuristic):**
 - **season_number**: Regex patterns (S01, Season 1, etc.)
 - **episode_number**: Regex patterns (E01, 1x01, etc.)
 
-### Content Metadata (ML/LLM)
+**From remaining text after ML extraction:**
+- **Codec**: Patterns (x264, x265, HEVC, AV1, FLAC, AAC, etc.)
+- **Bitrate**: Patterns (320kbps, 192, 24bit, 16bit, V0, etc.)
+- **Resolution**: Patterns (1080p, 720p, 4K, 2160p, etc.)
+- **Audio languages**: Patterns (English, ENG, MULTI, DUAL, Spanish, etc.)
+- **Subtitle languages**: Patterns (SUBS, English.srt, SPA.SUBS, embedded patterns, etc.)
 
-Options:
+Note: Subtitle languages inferred from both:
+- External subtitle files (.srt, .sub, .ass)
+- Filename patterns indicating embedded subs (MULTI.SUBS, ENG.SPA.SUBS, etc.)
+
+### Content Metadata Model Options
+
 1. **LLM labeling → train smaller model**: Use LLM with JSON schema prompting to label dataset, then fine-tune a small model for extraction
 2. **Direct LLM inference**: Use small LLM (Qwen2.5-0.5B) embedded in binary for extraction
 3. **Hybrid**: Regex extraction for common patterns, LLM for ambiguous cases
 
 ## Implementation Order
 
-1. [ ] Technical metadata extraction (heuristics in Rust)
-2. [ ] Content metadata labeling pipeline (LLM)
-3. [ ] Content metadata model training or integration
+1. [ ] Content metadata labeling pipeline (LLM)
+2. [ ] Train/integrate content metadata model
+3. [ ] Technical metadata extraction (regex on remainder, in Rust)
 
 ## Open Questions
 
@@ -199,3 +246,156 @@ Classification is essentially instant compared to extraction.
 1. Use local LLM (qwen2.5:3b) for labeling instead of GLiNER
 2. Slower but potentially better quality training data
 3. Then distill to smaller model
+
+---
+
+## Ground-Truth Training Data Generation (2025-01-20)
+
+### The Problem with LLM Labeling
+
+LLM consensus extraction (qwen3-coder + gpt-oss-120b) achieved only ~52% agreement on random torrent samples. This means:
+- 48% of samples have ambiguous or contested labels
+- No ground truth to verify which model is correct
+- Training on contested labels introduces noise
+
+### New Approach: Reverse Lookup from Known Metadata
+
+Instead of extracting metadata from random torrents, we **start with known-good metadata** and find matching torrents:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    GROUND-TRUTH PIPELINE                           │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│   ┌─────────────┐    ┌─────────────┐    ┌─────────────┐            │
+│   │   TMDB      │    │ MusicBrainz │    │  Other DBs  │            │
+│   │ (movies,TV) │    │  (albums)   │    │  (future)   │            │
+│   └──────┬──────┘    └──────┬──────┘    └──────┬──────┘            │
+│          │                  │                  │                    │
+│          └──────────────────┼──────────────────┘                    │
+│                             ▼                                       │
+│                  ┌─────────────────────┐                            │
+│                  │   Ground Truth DB   │                            │
+│                  │   (title, year,     │                            │
+│                  │    artist, type)    │                            │
+│                  └──────────┬──────────┘                            │
+│                             │                                       │
+│                             ▼                                       │
+│                  ┌─────────────────────┐                            │
+│                  │  Magnetico Search   │                            │
+│                  │  (FTS5 full-text)   │                            │
+│                  │  32.5M torrents     │                            │
+│                  └──────────┬──────────┘                            │
+│                             │                                       │
+│                             ▼                                       │
+│                  ┌─────────────────────┐                            │
+│                  │  Heuristic Scoring  │                            │
+│                  │  - Title match      │                            │
+│                  │  - Year match       │                            │
+│                  │  - Size sanity      │                            │
+│                  └──────────┬──────────┘                            │
+│                             │                                       │
+│                             ▼                                       │
+│                  ┌─────────────────────┐                            │
+│                  │  Training Samples   │                            │
+│                  │  Input: torrent     │                            │
+│                  │  Label: ground truth│                            │
+│                  └─────────────────────┘                            │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Data Sources
+
+| Source | Content Type | Target Count | Expected Matches |
+|--------|--------------|--------------|------------------|
+| TMDB | Movies | 2,000 | ~6,000 (3/movie) |
+| TMDB | TV Series | 500 | ~1,500 (3/series) |
+| MusicBrainz | Albums | 5,000 | ~10,000 (2/album) |
+| **Total** | | **7,500** | **~17,500 samples** |
+
+### Implementation Steps
+
+1. **Fetch ground truth metadata**
+   - TMDB API: `/movie/top_rated`, `/tv/top_rated` (paginated)
+   - MusicBrainz API: popular releases query
+   - Store in SQLite: `ground_truth(id, type, title, artist, year, tmdb_id, mb_id)`
+
+2. **Search Magnetico for matches**
+   - FTS5 query: `"Inception 2010"` for movies
+   - FTS5 query: `"Pink Floyd" "Dark Side"` for albums
+   - Store in: `matches(ground_truth_id, torrent_id, torrent_name, score)`
+
+3. **Score and filter matches**
+   - **Title match**: Levenshtein distance or fuzzy match
+   - **Year match**: Exact match in torrent name (+5 points)
+   - **Size sanity**: Movies 700MB-50GB, Albums 50MB-2GB
+   - **Negative signals**: "sample", "trailer", "teaser" (-10 points)
+   - Keep matches with score > threshold
+
+4. **Generate training samples**
+   ```json
+   {
+     "input": "Inception.2010.1080p.BluRay.x264-SPARKS",
+     "label": {
+       "type": "video/movie",
+       "title": "Inception",
+       "year": 2010
+     }
+   }
+   ```
+
+5. **(Optional) Synthetic augmentation**
+   - Generate naming variations from real matches
+   - `Inception (2010) 1080p` → `Inception.2010.1080p`, `[YTS] Inception 2010`
+   - Can 3-5x the dataset size
+
+### Advantages
+
+| Aspect | LLM Consensus | Ground-Truth Lookup |
+|--------|---------------|---------------------|
+| Label accuracy | ~52% agreement | 100% (by definition) |
+| Scalability | Slow (LLM inference) | Fast (SQL queries) |
+| Coverage | Random samples | Popular content |
+| Augmentation | Limited | Easy synthetic variants |
+
+### Scripts
+
+- `scripts/fetch_tmdb_metadata.py` - Pull movies/series from TMDB
+- `scripts/fetch_musicbrainz_metadata.py` - Pull albums from MusicBrainz
+- `scripts/match_torrents.py` - Search magnetico, score matches
+- `scripts/export_training_data.py` - Generate final training set
+
+### Database Schema
+
+```sql
+-- Ground truth from external sources
+CREATE TABLE ground_truth (
+    id INTEGER PRIMARY KEY,
+    type TEXT NOT NULL,  -- 'movie', 'tv', 'album'
+    title TEXT NOT NULL,
+    artist TEXT,         -- for albums
+    year INTEGER,
+    external_id TEXT,    -- TMDB ID or MusicBrainz ID
+    source TEXT NOT NULL -- 'tmdb' or 'musicbrainz'
+);
+
+-- Matched torrents from magnetico
+CREATE TABLE matches (
+    id INTEGER PRIMARY KEY,
+    ground_truth_id INTEGER REFERENCES ground_truth(id),
+    torrent_name TEXT NOT NULL,
+    torrent_size INTEGER,
+    match_score REAL,
+    UNIQUE(ground_truth_id, torrent_name)
+);
+
+-- Final training samples
+CREATE TABLE training_samples (
+    id INTEGER PRIMARY KEY,
+    input TEXT NOT NULL,      -- torrent name (+ files)
+    label_json TEXT NOT NULL, -- ground truth as JSON
+    source TEXT NOT NULL,     -- 'matched' or 'synthetic'
+    match_id INTEGER REFERENCES matches(id)
+);
+```
