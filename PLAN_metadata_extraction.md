@@ -22,8 +22,7 @@ Extract structured metadata from torrent content based on medium type and subcat
   "series_title": "string (required)",
   "episode_title": "string (optional)",
   "season_number": "number (optional) - HEURISTIC: extracted via regex (S01E01, 1x01)",
-  "episode_number": "number (optional) - HEURISTIC: extracted via regex (S01E01, 1x01)",
-  "year": "number (optional)"
+  "episode_number": "number (optional) - HEURISTIC: extracted via regex (S01E01, 1x01)"
 }
 ```
 
@@ -31,8 +30,7 @@ Extract structured metadata from torrent content based on medium type and subcat
 ```json
 {
   "series_title": "string (required)",
-  "season_number": "number (optional) - HEURISTIC: extracted via regex or directory structure",
-  "year": "number (optional)"
+  "season_number": "number (optional) - HEURISTIC: extracted via regex or directory structure"
 }
 ```
 
@@ -60,8 +58,7 @@ Extract structured metadata from torrent content based on medium type and subcat
 {
   "album_name": "string (required)",
   "artist": "string (optional)",
-  "year": "number (optional)",
-  "track_count": "number (required)"
+  "year": "number (optional)"
 }
 ```
 
@@ -80,20 +77,29 @@ Extract structured metadata from torrent content based on medium type and subcat
   "containers": "string[] (required)",
   "codec": "string (optional)",
   "bitrate": "string (optional)",
-  "resolution": "string (optional)"
+  "resolution": "string (optional)",
+  "audio_languages": "string[] (optional)",
+  "subtitle_languages": "string[] (optional)"
 }
 ```
 
 ## Implementation Approach
 
-### Technical Metadata (Heuristics - Rust)
+### Heuristic Extraction (Rust regex, no ML needed)
 
-Can be extracted from filenames using pattern matching:
+Can be extracted from filenames/structure using pattern matching:
 
+**Technical metadata:**
 - **Containers**: File extensions (mkv, mp4, avi, flac, mp3, etc.)
 - **Codec**: Filename patterns (x264, x265, HEVC, AV1, FLAC, AAC, etc.)
 - **Bitrate**: Filename patterns (320, 192, 24bit, 16bit, V0, etc.)
 - **Resolution**: Filename patterns (1080p, 720p, 4K, 2160p, etc.)
+- **Audio languages**: Filename patterns (English, ENG, MULTI, DUAL, Spanish, etc.)
+- **Subtitle languages**: Filename patterns (SUBS, .srt files, English.srt, etc.)
+
+**Content metadata (heuristic):**
+- **season_number**: Regex patterns (S01, Season 1, etc.)
+- **episode_number**: Regex patterns (E01, 1x01, etc.)
 
 ### Content Metadata (ML/LLM)
 
@@ -110,8 +116,7 @@ Options:
 
 ## Open Questions
 
-- [ ] Should software and book types have metadata schemas?
-- [ ] For audio/collection, how to handle Various Artists compilations?
+- [ ] For audio/collection, how to handle Various Artists compilations? (Current approach: `artists[]` array can hold multiple artists or `["Various Artists"]`)
 
 ---
 
@@ -172,7 +177,7 @@ Classification is essentially instant compared to extraction.
 1. **GLiNER is the best option** for bulk labeling due to speed
 2. **Quality is acceptable** but not perfect - fine for training data generation
 3. **Heuristic extraction** (Rust regex, no ML needed):
-   - Technical: resolution, codec, bitrate, containers
+   - Technical: resolution, codec, bitrate, containers, audio_languages, subtitle_languages
    - Video: season_number, episode_number (S01E01 patterns)
 4. **ML extraction** (needs NER/model):
    - Video: series_title, episode_title, movie title, year
