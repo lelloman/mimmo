@@ -17,7 +17,7 @@ from difflib import SequenceMatcher
 DB_PATH = "/home/lelloman/lelloprojects/mimmo/data/training_ground_truth.db"
 
 # Current heuristic version - increment when updating rules
-HEURISTIC_VERSION = 3
+HEURISTIC_VERSION = 5
 
 
 @dataclass
@@ -27,12 +27,32 @@ class Extraction:
     year: int | None = None
 
 
+def normalize_for_match(s: str) -> str:
+    """Normalize string for matching - handle common substitutions."""
+    import unicodedata
+    s = s.lower().strip()
+    # Underscores to spaces (before other normalizations)
+    s = s.replace('_', ' ')
+    # Normalize unicode accents (Rodriguez vs Rodríguez)
+    s = unicodedata.normalize('NFD', s)
+    s = ''.join(c for c in s if unicodedata.category(c) != 'Mn')
+    # AC-DC → AC/DC (common band name variation)
+    s = re.sub(r'\bac-dc\b', 'ac/dc', s)
+    # Normalize various quote styles
+    s = s.replace(''', "'").replace(''', "'").replace('"', '"').replace('"', '"')
+    # Normalize dashes
+    s = s.replace('–', '-').replace('—', '-')
+    # Remove extra spaces
+    s = re.sub(r'\s+', ' ', s)
+    return s
+
+
 def similarity(a: str | None, b: str | None) -> float:
     """Calculate similarity ratio between two strings."""
     if not a or not b:
         return 0.0
-    a = a.lower().strip()
-    b = b.lower().strip()
+    a = normalize_for_match(a)
+    b = normalize_for_match(b)
     return SequenceMatcher(None, a, b).ratio()
 
 
@@ -404,11 +424,200 @@ def extract_album_v3(name: str) -> Extraction:
     return result
 
 
+def extract_album_v4(name: str) -> Extraction:
+    """
+    Version 4: Minimal safe improvements over v3.
+
+    Only adds clearly safe improvements:
+    - Site prefix removal: [ OxTorrent.com ]
+    - Genre prefix removal: (R&B Soul)
+    - "1st solo album" descriptor removal
+    - "Beats" uploader name removal
+
+    Uses v3's proven logic for everything else.
+    """
+    result = Extraction()
+
+    # Clean the name
+    name = clean_torrent_name(name)
+
+    # Remove emojis early
+    name = re.sub(r'[⭐️🎵🎶🔥💿📀😎]+', '', name)
+
+    # v4 addition: Remove site prefixes
+    name = re.sub(r'^\s*\[[^\]]*(?:\.com|\.org|\.net|\.info|torrents?)[^\]]*\]\s*', '', name, flags=re.IGNORECASE)
+
+    # v4 addition: Remove genre prefixes in parentheses at start
+    name = re.sub(r'^\s*\([^)]*(?:R&B|Soul|Hip[- ]?Hop|Rap|Pop|Rock|Jazz|Blues|Metal|Punk|Electronic)\s*[^)]*\)\s*', '', name, flags=re.IGNORECASE)
+
+    # v4 addition: Remove descriptors like "1st solo album"
+    name = re.sub(r'\s*\d+(?:st|nd|rd|th)\s+(?:solo\s+)?album\s*', ' ', name, flags=re.IGNORECASE)
+
+    # Only remove curly braces that clearly contain catalog/label info (same as v3)
+    name = re.sub(r'\{[^}]*(?:Records|Label|Republic|Capitol|\d{10,})[^}]*\}', '', name, flags=re.IGNORECASE)
+
+    # === Year extraction (same as v3) ===
+    match = re.search(r'\[(\d{4})[.\-]\d{2}[.\-]\d{2}\]', name)
+    if match:
+        result.year = int(match.group(1))
+        name = name[:match.start()] + name[match.end():]
+
+    if result.year is None:
+        match = re.search(r'\[(\d{4})\s*[-–]\s*\d+\]', name)
+        if match:
+            year = int(match.group(1))
+            if 1900 <= year <= 2030:
+                result.year = year
+                name = name[:match.start()] + name[match.end():]
+
+    if result.year is None:
+        match = re.search(r'\((\d{4})\s+((?:Pop|Rock|Hip\s*Hop|Rap|Jazz|Blues|Country|Metal|Punk|R&B|Soul|Electronic|Dance|Classical|Indie|Alternative|Folk)[A-Za-z\s]*)\)', name, re.IGNORECASE)
+        if match:
+            year = int(match.group(1))
+            if 1900 <= year <= 2030:
+                result.year = year
+                name = name[:match.start()] + name[match.end():]
+
+    if result.year is None:
+        result.year, name = extract_year(name)
+
+    # === Remove format tags (same as v3) ===
+    name = re.sub(r'\[.*?\]', '', name)
+    name = re.sub(r'\((?:FLAC|MP3|AAC|OGG|WAV|320|256|192|V0|24[\-_]?(?:44|48|96|192)|16[\-_]?44).*?\)', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\(Explicit\)', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\((?:Big\s*Papi|ETTV|PMEDIA)\)', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\s+(?:NimitMak|SilverRG|Big\s*Papi)\s*(?:NimitMak|SilverRG|Big\s*Papi)*\s*$', '', name, flags=re.IGNORECASE)
+
+    name = re.sub(r'(?:FLAC|MP3|AAC|WEB|CD|VINYL|LP|Vinyl|vinyl|CD-?RIP|WEB-?DL|WEB-?FLAC)\b', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'@?\b(?:320|256|192|V0)\s*(?:kbps|cbr|vbr)?\b', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\b(?:24|16)[\-_]?(?:44|48|96|192)\b', '', name)
+    name = re.sub(r'\b(?:24Bit|16Bit|24BIT|16BIT|16BITS|24BITS)[-_]?\d*k?Hz?\b', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\b\d+\.?\d*\s*k?Hz\b', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\bHi-?Res\b', '', name, flags=re.IGNORECASE)
+
+    # v4 addition: Remove "Beats" at end (uploader name)
+    name = re.sub(r'\s+Beats\s*$', '', name, flags=re.IGNORECASE)
+
+    # Edition stripping (same conservative approach as v3)
+    edition_pattern = r'\((?:' + '|'.join([
+        r'00XO\s+Edition',
+        r'Exclusive\s+\d+\s+Track\s+[A-Za-z\s]+',
+        r'Target\s+Exclusive',
+        r'Store\s+Exclusive',
+        r'Dolby\s+Atmos(?:\s+Edition)?',
+        r'with\s+[^)]+',
+        r'by\s+\w+',
+    ]) + r')\)'
+    name = re.sub(edition_pattern, '', name, flags=re.IGNORECASE)
+
+    # Collapse dashes
+    name = re.sub(r'[-_]{2,}', '-', name)
+
+    # Release group removal (same as v3)
+    known_groups = [
+        'EICHBAUM', 'MyDad', 'Sc4r3cr0w', 'PMEDIA', 'MiRCrew', 'GloDLS',
+        'HANNIBAL', 'SilverRG', 'NimitMak', 'Michi80', 'PERFECT', 'ETRG',
+        'JLM', 'FLAC', 'WEB', 'ETTV', 'CD', 'MT', 'TBS', 'RNS', 'MIXFIEND',
+        'EAC', 'FNT', 'MFA', 'HHI', 'CR', 'HB', 'C4', 'MOD', 'ESC', 'P2P',
+        'VAG', 'MARR', 'FLAWL3SS', 'TX', 'OMA', 'XRIP', 'BPM', 'ENRiCH',
+        '401', 'sn3hdj3', 'Hunter', 'FTD', 'DGN', 'ePHEMERiD', 'JUST',
+        'ENRAGED', 'CDS', '2CD', 'ADVANCE', 'RETAIL', 'CLEAN', 'REMASTER',
+        'ALAC', 'INT', 'SHADOW', 'TOBLERONE', 'FAF', 'IDN', 'CREW'
+    ]
+    group_pattern = r'[\-_]\s*(?:' + '|'.join(known_groups) + r')$'
+    for _ in range(3):
+        name = re.sub(group_pattern, '', name, flags=re.IGNORECASE)
+
+    # Cleanup patterns (same as v3)
+    name = re.sub(r'[-_](?:WEB|CD|VINYL|LP)[-_]?(?:[A-Z]{2,3})?[-_]?(?:FLAC|MP3)?$', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'[-_](?:ES|US|UK|DE|FR|JP|KR)$', '', name, flags=re.IGNORECASE)
+
+    format_prefix = r'(?:FLAC|WEB|CD|MP3|AAC|ADVANCE|RETAIL|2CD)'
+    name = re.sub(rf'[-_]{format_prefix}[A-Z0-9]{{2,8}}$', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'[-_]2?CD[A-Z]{2,6}$', '', name, flags=re.IGNORECASE)
+
+    lang_codes = r'(?:ES|US|UK|DE|FR|JP|KR|EN|IT|NL|PT|PL|RU|SE|NO|DK|FI)'
+    name = re.sub(rf'[-_]{lang_codes}[A-Z0-9]{{2,8}}$', '', name)
+
+    name = re.sub(r'[-_\s]+(?:MFSL|Capitol\s+SO)[A-Z0-9\-]+$', '', name)
+    name = re.sub(r'\s+SO-\d+$', '', name)
+    name = re.sub(r'\s+[A-Z0-9]+-\d{1,3}$', '', name)
+    name = re.sub(r'[-_]\d{4}$', '', name)
+
+    # Clean up
+    name = re.sub(r'\s*[\-_]+\s*$', '', name)
+    name = re.sub(r'^\s*[\-_]+\s*', '', name)
+    name = re.sub(r'\s+', ' ', name).strip()
+
+    # Split into Artist - Album
+    match = re.match(r'^(.+?)\s*[-–—]\s*(.+)$', name)
+    if match:
+        result.artist = match.group(1).strip()
+        result.title = match.group(2).strip()
+        if result.title:
+            result.title = re.sub(r'\s*[-–—]\s*$', '', result.title)
+            result.title = re.sub(r'^\s*[-–—]\s*', '', result.title)
+
+    return result
+
+
+def extract_album_v5(name: str) -> Extraction:
+    """
+    Version 5: Handle year-first backwards format.
+
+    Pattern: [YEAR] Title - Artist - <size> @ <bitrate>
+    Example: "[2003] Meteora - Linkin Park - 91mb @ 320kbs"
+
+    This specific format (from certain uploaders) puts year first, then title,
+    then artist, followed by size/bitrate info.
+
+    Falls back to v4 for normal formats.
+    """
+    result = Extraction()
+
+    # Clean the name
+    name = clean_torrent_name(name)
+
+    # Remove emojis early
+    name = re.sub(r'[⭐️🎵🎶🔥💿📀😎♪]+', '', name)
+
+    # Check for year-first backwards format with size/bitrate metadata:
+    # [YEAR] Title - Artist - <size> @ <bitrate>
+    # or [YEAR] Title - Artist @ <bitrate>
+    # The key is the @ bitrate indicator AFTER the artist name
+    year_first_with_metadata = re.match(
+        r'^\s*\[(\d{4})\]\s*(.+?)\s*[-–—]\s*(.+?)\s*[-–—]?\s*(?:\d+\s*(?:mb|gb)\s*)?@\s*\d+',
+        name,
+        re.IGNORECASE
+    )
+
+    if year_first_with_metadata:
+        year = int(year_first_with_metadata.group(1))
+        if 1900 <= year <= 2030:
+            potential_title = year_first_with_metadata.group(2).strip()
+            potential_artist = year_first_with_metadata.group(3).strip()
+
+            # Clean up artist (remove trailing artifacts)
+            potential_artist = re.sub(r'\s*[-–—]\s*$', '', potential_artist)
+            potential_artist = re.sub(r'\s*\d+\s*(?:mb|gb|kb)\b.*$', '', potential_artist, flags=re.IGNORECASE)
+
+            if potential_title and potential_artist and len(potential_artist) > 1:
+                result.year = year
+                result.title = potential_title
+                result.artist = potential_artist.strip()
+                return result
+
+    # Not a year-first backwards format, use v4
+    return extract_album_v4(name)
+
+
 # Map of heuristic versions to extraction functions
 EXTRACTORS = {
     1: extract_album_v1,
     2: extract_album_v2,
     3: extract_album_v3,
+    4: extract_album_v4,
+    5: extract_album_v5,
 }
 
 

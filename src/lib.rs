@@ -46,6 +46,9 @@ pub use error::Error;
 // Cascade classification system
 pub mod cascade;
 
+// Metadata extraction using SmolLM
+pub mod metadata;
+
 mod error {
     use std::fmt;
 
@@ -57,6 +60,7 @@ mod error {
         Zip(zip::result::ZipError),
         Shape(ndarray::ShapeError),
         Ort(ort::Error),
+        Model(String),
     }
 
     impl fmt::Display for Error {
@@ -68,6 +72,7 @@ mod error {
                 Error::Zip(e) => write!(f, "Zip error: {}", e),
                 Error::Shape(e) => write!(f, "Shape error: {}", e),
                 Error::Ort(e) => write!(f, "ORT error: {}", e),
+                Error::Model(e) => write!(f, "Model error: {}", e),
             }
         }
     }

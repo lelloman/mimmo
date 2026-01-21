@@ -32,3 +32,4 @@ training/bert-classifier-*/checkpoint-*
 training/bert-classifier-*/runs/
 training/bert-classifier-*/onnx/
 training/bert-classifier-*/final/
+models/
