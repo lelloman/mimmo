@@ -2,8 +2,15 @@
 //!
 //! Extracts structured metadata (title, artist, year) from torrent names
 //! using a GGUF-quantized causal language model via llama.cpp.
+//!
+//! Uses memfd_create on Linux to load the model from memory without disk I/O.
 
+use std::ffi::CString;
 use std::io::Write;
+use std::os::unix::io::FromRawFd;
+use std::fs::File;
+use std::sync::OnceLock;
+
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
@@ -13,14 +20,25 @@ use llama_cpp_2::token::data_array::LlamaTokenDataArray;
 
 use crate::Error;
 
+// Global backend - can only be initialized once (with logging disabled)
+static LLAMA_BACKEND: OnceLock<LlamaBackend> = OnceLock::new();
+
+fn init_backend() -> LlamaBackend {
+    let mut backend = LlamaBackend::init().expect("Failed to init llama backend");
+    backend.void_logs(); // Suppress all llama.cpp output
+    backend
+}
+
 // Field counts for truncation
 const FIELD_COUNTS: &[(&str, usize)] = &[
     ("video/movie", 2),    // title | year
     ("video/episode", 1),  // series_title
     ("video/season", 1),   // series_title
     ("video/series", 1),   // series_title
+    ("video/other", 2),    // title | year (fallback)
     ("audio/album", 3),    // album | artist | year
     ("audio/track", 3),    // track | artist | year
+    ("audio/other", 3),    // title | artist | year (fallback)
 ];
 
 // Embed model file
@@ -42,29 +60,53 @@ pub struct ExtractedMetadata {
 /// Metadata extractor using SmolLM via llama.cpp
 pub struct MetadataExtractor {
     model: LlamaModel,
-    backend: LlamaBackend,
+}
+
+/// Create an in-memory file using memfd_create (Linux only).
+/// Returns the path to access it via /proc/self/fd/N
+fn create_memfd_with_data(name: &str, data: &[u8]) -> Result<String, Error> {
+    let c_name = CString::new(name)
+        .map_err(|e| Error::Model(format!("Invalid memfd name: {}", e)))?;
+
+    // Create anonymous in-memory file
+    let fd = unsafe { libc::memfd_create(c_name.as_ptr(), 0) };
+    if fd < 0 {
+        return Err(Error::Model(format!(
+            "memfd_create failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    // Write data to the memfd
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    file.write_all(data)
+        .map_err(|e| Error::Model(format!("Failed to write to memfd: {}", e)))?;
+
+    // Don't close the fd - we need it to stay open
+    // Forget the File so it doesn't close the fd on drop
+    let fd = std::mem::ManuallyDrop::new(file);
+    use std::os::unix::io::AsRawFd;
+    let raw_fd = fd.as_raw_fd();
+
+    // Return path via /proc/self/fd/
+    Ok(format!("/proc/self/fd/{}", raw_fd))
 }
 
 impl MetadataExtractor {
     /// Create a new metadata extractor
     pub fn new() -> Result<Self, Error> {
-        // Initialize backend
-        let backend = LlamaBackend::init()
-            .map_err(|e| Error::Model(format!("Failed to init llama backend: {}", e)))?;
+        // Initialize backend (only once globally, with logging disabled)
+        let backend = LLAMA_BACKEND.get_or_init(init_backend);
 
-        // Write model to temp file (llama.cpp needs a file path)
-        let mut temp_file = tempfile::NamedTempFile::new()
-            .map_err(|e| Error::Model(format!("Failed to create temp file: {}", e)))?;
-        temp_file.write_all(EXTRACTOR_MODEL)
-            .map_err(|e| Error::Model(format!("Failed to write model: {}", e)))?;
-        let model_path = temp_file.into_temp_path();
+        // Create in-memory file using memfd_create
+        let model_path = create_memfd_with_data("smollm.gguf", EXTRACTOR_MODEL)?;
 
-        // Load model
+        // Load model from memfd path
         let model_params = LlamaModelParams::default();
-        let model = LlamaModel::load_from_file(&backend, model_path, &model_params)
+        let model = LlamaModel::load_from_file(backend, &model_path, &model_params)
             .map_err(|e| Error::Model(format!("Failed to load model: {}", e)))?;
 
-        Ok(Self { model, backend })
+        Ok(Self { model })
     }
 
     /// Extract metadata from a torrent name
@@ -98,9 +140,10 @@ impl MetadataExtractor {
     /// Generate text using the model
     fn generate(&self, prompt: &str, max_tokens: usize) -> Result<String, Error> {
         // Create context
+        let backend = LLAMA_BACKEND.get().expect("Backend not initialized");
         let ctx_params = LlamaContextParams::default()
             .with_n_ctx(std::num::NonZeroU32::new(512));
-        let mut ctx = self.model.new_context(&self.backend, ctx_params)
+        let mut ctx = self.model.new_context(backend, ctx_params)
             .map_err(|e| Error::Model(format!("Failed to create context: {}", e)))?;
 
         // Tokenize prompt
@@ -280,5 +323,36 @@ mod tests {
         println!("Year: {:?}", result.year);
 
         assert!(!result.title.is_empty());
+    }
+
+    #[test]
+    fn test_multiple_extractions() {
+        let extractor = MetadataExtractor::new().expect("Failed to load model");
+
+        // Test 1: Audio album
+        let result1 = extractor.extract(
+            "Radiohead - OK Computer (1997) [FLAC]",
+            "audio/album"
+        ).expect("Extraction 1 failed");
+        println!("1: {} | {:?} | {:?}", result1.title, result1.artist, result1.year);
+
+        // Test 2: Video movie
+        let result2 = extractor.extract(
+            "Inception.2010.1080p.BluRay",
+            "video/movie"
+        ).expect("Extraction 2 failed");
+        println!("2: {} | {:?}", result2.title, result2.year);
+
+        // Test 3: Another audio album
+        let result3 = extractor.extract(
+            "Nirvana - Nevermind (1991) [320kbps]",
+            "audio/album"
+        ).expect("Extraction 3 failed");
+        println!("3: {} | {:?} | {:?}", result3.title, result3.artist, result3.year);
+
+        // Verify extractions work
+        assert!(!result1.title.is_empty());
+        assert!(!result2.title.is_empty());
+        assert!(!result3.title.is_empty());
     }
 }

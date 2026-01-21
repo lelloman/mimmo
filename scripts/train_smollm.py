@@ -4,11 +4,13 @@ Fine-tune SmolLM-135M for torrent metadata extraction.
 
 Usage:
     python scripts/train_smollm.py
+    python scripts/train_smollm.py --resume_from_checkpoint models/smollm-metadata/checkpoint-11500
 
 Requires: transformers, datasets, peft, accelerate, bitsandbytes
     pip install transformers datasets peft accelerate bitsandbytes
 """
 
+import argparse
 import json
 from pathlib import Path
 
@@ -28,7 +30,7 @@ TRAINING_DATA = Path(__file__).parent.parent / "data" / "llm_training_data.jsonl
 OUTPUT_DIR = Path(__file__).parent.parent / "models" / "smollm-metadata"
 
 # Model
-MODEL_NAME = "HuggingFaceTB/SmolLM-135M-Instruct"
+MODEL_NAME = "HuggingFaceTB/SmolLM-360M-Instruct"
 
 # Training config
 BATCH_SIZE = 32
@@ -52,6 +54,11 @@ def load_training_data():
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Fine-tune SmolLM for metadata extraction")
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None,
+                        help="Path to checkpoint directory to resume from")
+    args = parser.parse_args()
+
     print(f"Loading model: {MODEL_NAME}")
 
     # Check GPU
@@ -142,8 +149,11 @@ def main():
     )
 
     # Train
-    print("Starting training...")
-    trainer.train()
+    if args.resume_from_checkpoint:
+        print(f"Resuming from checkpoint: {args.resume_from_checkpoint}")
+    else:
+        print("Starting training from scratch...")
+    trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
 
     # Save
     print(f"Saving model to {OUTPUT_DIR}")

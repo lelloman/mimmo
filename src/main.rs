@@ -1,8 +1,19 @@
 use mimmo::cascade::{Cascade, Confidence, Medium, StageResult};
+use mimmo::metadata::MetadataExtractor;
 use mimmo::{from_path, from_text, detect_subcategory, ContentInfo};
 use serde::Serialize;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
+
+#[derive(Serialize)]
+struct ExtractedMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artist: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    year: Option<u16>,
+}
 
 #[derive(Serialize)]
 struct JsonResult {
@@ -11,9 +22,11 @@ struct JsonResult {
     subcategory: Option<&'static str>,
     confidence: f32,
     source: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<ExtractedMetadata>,
 }
 
-fn stage_result_to_json(r: &StageResult, info: &ContentInfo) -> JsonResult {
+fn stage_result_to_json(r: &StageResult, info: &ContentInfo, extractor: Option<&MetadataExtractor>) -> JsonResult {
     let confidence = match r.confidence {
         Confidence::High => 0.95,
         Confidence::Medium => 0.75,
@@ -31,11 +44,28 @@ fn stage_result_to_json(r: &StageResult, info: &ContentInfo) -> JsonResult {
     } else {
         None
     };
+
+    // Extract metadata for audio/video content
+    let metadata = if let (Some(ext), Some(sub)) = (extractor, subcategory) {
+        let content_type = format!("{}/{}", medium, sub);
+        match ext.extract(&info.name, &content_type) {
+            Ok(m) => Some(ExtractedMetadata {
+                title: if m.title.is_empty() { None } else { Some(m.title) },
+                artist: m.artist,
+                year: m.year,
+            }),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
     JsonResult {
         medium,
         subcategory,
         confidence,
         source: r.source,
+        metadata,
     }
 }
 
@@ -98,7 +128,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Classify
     let cascade = Cascade::default_with_ml()?;
     let result = cascade.classify(&content_info)?;
-    let json_result = stage_result_to_json(&result, &content_info);
+
+    // Create metadata extractor for audio/video
+    let extractor = if matches!(result.medium, Medium::Audio | Medium::Video) {
+        MetadataExtractor::new().ok()
+    } else {
+        None
+    };
+
+    let json_result = stage_result_to_json(&result, &content_info, extractor.as_ref());
 
     // Output JSON
     println!("{}", serde_json::to_string(&json_result)?);
@@ -108,6 +146,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn interactive_mode() -> Result<(), Box<dyn std::error::Error>> {
     let cascade = Cascade::default_with_ml()?;
+    let extractor = MetadataExtractor::new().ok();
 
     let stdin = io::stdin();
     let mut stdout = io::stdout();
@@ -138,7 +177,12 @@ fn interactive_mode() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             let result = cascade.classify(&content_info)?;
-            results.push(stage_result_to_json(&result, &content_info));
+            let ext_ref = if matches!(result.medium, Medium::Audio | Medium::Video) {
+                extractor.as_ref()
+            } else {
+                None
+            };
+            results.push(stage_result_to_json(&result, &content_info, ext_ref));
         }
 
         // Output JSON array of results
