@@ -15,7 +15,7 @@ cd mimmo
 cargo build --release
 ```
 
-The build script automatically downloads the metadata extraction model (~259MB) from HuggingFace on first build.
+The build script automatically downloads both models (~276MB total) from HuggingFace on first build.
 
 ## CLI Usage
 
@@ -148,10 +148,11 @@ For audio and video content, structural analysis determines subcategory:
 ## Models
 
 ### Content Classifier
-- BERT-tiny model (~4MB) embedded in binary
+- BERT-tiny model (~17MB ONNX) embedded in binary
 - Base: `prajjwal1/bert-tiny`
 - Training: ~10k samples with 4-LLM consensus voting
 - Accuracy: ~92% on held-out test set
+- Model: [lelloman/bert-torrent-classifier](https://huggingface.co/lelloman/bert-torrent-classifier)
 - Inference: <10ms per sample
 
 ### Metadata Extractor
@@ -163,17 +164,15 @@ For audio and video content, structural analysis determines subcategory:
 
 ## Building
 
-The metadata extraction model must be downloaded before building:
-
 ```bash
-mkdir -p models/gguf
-wget -O models/gguf/smollm-q4_k_m.gguf \
-  https://huggingface.co/lelloman/smollm-torrent-metadata/resolve/main/smollm-q4_k_m.gguf
-
 cargo build --release
 ```
 
-The model is embedded in the binary at compile time using `include_bytes!`.
+The build script automatically downloads both models from HuggingFace on first build:
+- BERT classifier (~17MB) from [lelloman/bert-torrent-classifier](https://huggingface.co/lelloman/bert-torrent-classifier)
+- SmolLM metadata extractor (~259MB) from [lelloman/smollm-torrent-metadata](https://huggingface.co/lelloman/smollm-torrent-metadata)
+
+Both models are embedded in the binary at compile time using `include_bytes!`.
 
 ## Repository Structure
 
