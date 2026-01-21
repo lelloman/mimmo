@@ -114,10 +114,8 @@ const LABELS: [&str; 5] = ["audio", "video", "software", "book", "other"];
 const MAX_LENGTH: usize = 128;
 
 // Embed model files directly in the binary
-const MODEL_BYTES: &[u8] =
-    include_bytes!("../training/bert-classifier-medium/onnx/model_embedded.onnx");
-const TOKENIZER_JSON: &str =
-    include_str!("../training/bert-classifier-medium/onnx/tokenizer.json");
+const MODEL_BYTES: &[u8] = include_bytes!("../models/bert/model_embedded.onnx");
+const TOKENIZER_JSON: &str = include_str!("../models/bert/tokenizer.json");
 
 // Regex pattern for episode detection (S01E01, 1x01, etc)
 static EPISODE_PATTERN: Lazy<Regex> = Lazy::new(|| {
