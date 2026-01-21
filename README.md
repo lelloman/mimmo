@@ -46,6 +46,48 @@ mimmo -i
 # [{"medium":"audio",...},{"medium":"video",...},...]
 ```
 
+## Library Usage
+
+Add mimmo to your `Cargo.toml`:
+```toml
+[dependencies]
+mimmo = { git = "https://github.com/lelloman/mimmo" }
+```
+
+Example:
+```rust
+use mimmo::{from_path, from_text, detect_subcategory};
+use mimmo::cascade::Cascade;
+use mimmo::metadata::MetadataExtractor;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Load content from various sources
+    let info = from_path("/path/to/file.torrent")?;
+    // or: from_text("Pink Floyd - The Dark Side of the Moon (1973) [FLAC]")
+
+    // Classify using cascade (patterns + ML fallback)
+    let cascade = Cascade::default_with_ml()?;
+    let result = cascade.classify(&info)?;
+
+    println!("Medium: {:?}", result.medium);       // Audio, Video, Software, Book, Other
+    println!("Confidence: {:?}", result.confidence); // High, Medium, Low
+    println!("Source: {}", result.source);          // "extension", "patterns", "ml"
+
+    // Detect subcategory for audio/video
+    let subcategory = detect_subcategory("audio", &info); // album, track, collection
+
+    // Extract metadata for audio/video content
+    let extractor = MetadataExtractor::new()?;
+    let meta = extractor.extract(&info.name, "audio/album")?;
+
+    println!("Title: {}", meta.title);
+    println!("Artist: {:?}", meta.artist);
+    println!("Year: {:?}", meta.year);
+
+    Ok(())
+}
+```
+
 ## Output Format
 
 ```json
