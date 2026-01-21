@@ -12,14 +12,10 @@ Build from source:
 ```bash
 git clone https://github.com/lelloman/mimmo
 cd mimmo
-
-# Download the metadata extraction model
-mkdir -p models/gguf
-wget -O models/gguf/smollm-q4_k_m.gguf \
-  https://huggingface.co/lelloman/smollm-torrent-metadata/resolve/main/smollm-q4_k_m.gguf
-
 cargo build --release
 ```
+
+The build script automatically downloads the metadata extraction model (~259MB) from HuggingFace on first build.
 
 ## CLI Usage
 
