@@ -399,3 +399,143 @@ CREATE TABLE training_samples (
     match_id INTEGER REFERENCES matches(id)
 );
 ```
+
+---
+
+## Album Metadata Extraction: Heuristics Approach (2025-01-21)
+
+### Background
+
+After evaluating GLiNER for album metadata extraction, results were not acceptable. Two options were considered:
+1. Fine-tune a small LLM that can run on CPU
+2. Double down on heuristics, leveraging the large ground-truth dataset to iteratively refine rules
+
+**Decision**: Try heuristics first since we have a massive labeled dataset (~14k album samples from MusicBrainz matches).
+
+### Approach: Data-Driven Heuristic Refinement
+
+Instead of writing heuristics upfront, we use the ground-truth dataset to "train" the heuristics iteratively:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                 HEURISTIC REFINEMENT LOOP                          │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│   ┌─────────────┐                                                  │
+│   │    TODO     │  Samples that don't match yet                    │
+│   │   (5105)    │                                                  │
+│   └──────┬──────┘                                                  │
+│          │                                                          │
+│          ▼                                                          │
+│   ┌─────────────────────┐                                          │
+│   │  Run Heuristics     │                                          │
+│   │  extract(name) →    │                                          │
+│   │  {artist,title,year}│                                          │
+│   └──────────┬──────────┘                                          │
+│              │                                                      │
+│              ▼                                                      │
+│   ┌─────────────────────┐                                          │
+│   │  Compare to Ground  │  Year: exact match                       │
+│   │  Truth              │  Artist/Title: ≥70% similarity           │
+│   │                     │  (using MusicBrainz aliases)             │
+│   └──────────┬──────────┘                                          │
+│              │                                                      │
+│       ┌──────┴──────┐                                              │
+│       ▼             ▼                                              │
+│   ┌───────┐    ┌───────┐                                           │
+│   │ MATCH │    │ FAIL  │                                           │
+│   │ → DONE│    │→ TODO │                                           │
+│   └───────┘    └───────┘                                           │
+│                    │                                                │
+│                    ▼                                                │
+│          ┌─────────────────────┐                                   │
+│          │  Analyze failures,  │                                   │
+│          │  update heuristics  │                                   │
+│          └──────────┬──────────┘                                   │
+│                     │                                               │
+│                     ▼                                               │
+│          ┌─────────────────────┐                                   │
+│          │  REGRESSION TEST    │  Run on DONE items               │
+│          │  All must still pass│  If any fail, revert changes     │
+│          └─────────────────────┘                                   │
+│                                                                     │
+│   Repeat until plateau or ≥80% success rate                        │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Success Criteria
+
+- **Year**: Exact match required
+- **Artist**: ≥70% string similarity (using SequenceMatcher), checked against MusicBrainz aliases
+- **Title**: ≥70% string similarity
+- **Target**: ≥80% of samples passing = heuristics approach is viable
+
+### Current Progress
+
+| Version | Done | Todo | Success Rate |
+|---------|------|------|--------------|
+| v1 (baseline) | 8,151 | 5,663 | 59.0% |
+| v2 (improved year extraction) | 8,417 | 5,397 | 60.9% |
+| v3 (safe release group removal, editions) | 8,709 | 5,105 | **63.0%** |
+
+### Key Heuristics (v3)
+
+1. **Year extraction**: Multiple patterns - `(2024)`, `[2024]`, `[2024.11.22]`, standalone year
+2. **Format tag removal**: FLAC, MP3, 320kbps, 24bit, WEB, CD, etc.
+3. **Release group removal**: Whitelist-based (EICHBAUM, JLM, OMA, etc.) instead of generic pattern
+4. **Edition stripping**: "(with Isolated Vocals)", "(Store Exclusive)", "(00XO Edition)"
+5. **Scene format cleanup**: Handle concatenation artifacts like `-FLACJLM`, `-ESOMA`
+6. **Artist-Album split**: `^(.+?)\s*[-–—]\s*(.+)$` pattern
+
+### MusicBrainz Artist Aliases
+
+Extracted 9,480 aliases for artists in our ground truth from the MusicBrainz dump (`~/Downloads/musicbrainz/artist.tar.xz`). This helps match variations like:
+- "The Weeknd" ↔ "Abel Tesfaye"
+- "50 Cent" ↔ "Curtis Jackson"
+
+### Fallback Plan
+
+If heuristics plateau below 80%, fall back to:
+- Fine-tune a small LLM (e.g., Qwen2.5-0.5B) on the labeled dataset
+- Use the heuristics-extracted samples as additional training data
+
+### Scripts
+
+- `scripts/album_heuristics.py` - Main heuristics pipeline (run, regress, stats, failures)
+- `scripts/extract_mb_aliases.py` - Extract artist aliases from MusicBrainz dump
+- `scripts/fetch_musicbrainz_metadata.py` - Fetch ground truth from MusicBrainz API
+
+### Database Tables
+
+```sql
+-- Heuristics iteration tracking
+CREATE TABLE todo (
+    id INTEGER PRIMARY KEY,
+    torrent_name TEXT NOT NULL,
+    expected_artist TEXT,
+    expected_title TEXT,
+    expected_year INTEGER,
+    ground_truth_id INTEGER
+);
+
+CREATE TABLE done (
+    id INTEGER PRIMARY KEY,
+    torrent_name TEXT NOT NULL,
+    expected_artist TEXT,
+    expected_title TEXT,
+    expected_year INTEGER,
+    ground_truth_id INTEGER,
+    extracted_artist TEXT,
+    extracted_title TEXT,
+    extracted_year INTEGER,
+    heuristic_version INTEGER
+);
+
+CREATE TABLE artist_aliases (
+    id INTEGER PRIMARY KEY,
+    canonical_name TEXT NOT NULL,
+    alias TEXT NOT NULL,
+    mb_id TEXT,
+    UNIQUE(canonical_name, alias)
+);
+```
