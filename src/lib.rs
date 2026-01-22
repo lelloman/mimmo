@@ -46,6 +46,9 @@ pub use error::Error;
 // Cascade classification system
 pub mod cascade;
 
+// Format extraction from torrent names
+pub mod format;
+
 // Metadata extraction using SmolLM
 pub mod metadata;
 
