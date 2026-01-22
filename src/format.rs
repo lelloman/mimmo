@@ -1,10 +1,40 @@
 //! Format extraction from torrent names.
 //!
 //! This module parses torrent names to extract format information like
-//! resolution, codecs, quality tier, and episode numbers.
+//! resolution, codecs, quality tier, episode numbers, and language information.
 
 use once_cell::sync::Lazy;
 use regex::Regex;
+
+/// Audio/subtitle language.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Language {
+    English,
+    French,
+    German,
+    Spanish,
+    Italian,
+    Russian,
+    Japanese,
+    Korean,
+    Chinese,
+    Portuguese,
+    Dutch,
+    Polish,
+    /// Multi-language release
+    Multi,
+}
+
+/// Parsed language information from a torrent name.
+#[derive(Debug, Clone, Default)]
+pub struct ParsedLanguage {
+    /// Detected audio languages
+    pub audio: Vec<Language>,
+    /// Detected subtitle languages
+    pub subtitles: Vec<Language>,
+    /// Whether hardcoded subtitles were detected
+    pub hardcoded_subs: bool,
+}
 
 /// Video resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -87,6 +117,7 @@ pub struct ParsedFormat {
     pub container: Option<Container>,
     pub season: Option<u16>,
     pub episode: Option<u16>,
+    pub language: ParsedLanguage,
 }
 
 // Regex patterns
@@ -134,6 +165,122 @@ static SEASON_EPISODE_PATTERN: Lazy<Regex> = Lazy::new(|| {
 static SEASON_ONLY_PATTERN: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)\bS(\d{1,2})\b").unwrap()
 });
+
+// Language patterns
+static LANGUAGE_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?ix)
+        \b(
+            # Multi-language indicators
+            MULTI|DUAL(?:\s*AUDIO)?|MULTi\.?SUBS?|
+            # English
+            ENG(?:LISH)?|
+            # French variants
+            FRA?(?:ENCH)?|VFF|VFQ|VF|FRENCH|TRUEFRENCH|
+            # German
+            GER(?:MAN)?|DEU(?:TSCH)?|
+            # Spanish
+            SPA(?:NISH)?|ESP(?:ANOL)?|CASTELLANO|
+            # Italian
+            ITA(?:LIAN)?|
+            # Russian
+            RUS(?:SIAN)?|
+            # Japanese
+            JAP(?:ANESE)?|JPN|
+            # Korean
+            KOR(?:EAN)?|
+            # Chinese
+            CHI(?:NESE)?|
+            # Portuguese
+            POR(?:TUGUESE)?|
+            # Dutch
+            DUT(?:CH)?|NLD|
+            # Polish
+            POL(?:ISH)?
+        )\b",
+    )
+    .unwrap()
+});
+
+// Hardcoded subtitle indicators
+static HARDCODED_SUBS_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?ix)\b(HC|HARDCODED|HARDSUB)\b").unwrap()
+});
+
+/// Map a language code/name to the Language enum.
+fn parse_language_code(code: &str) -> Option<Language> {
+    let upper = code.to_uppercase();
+    match upper.as_str() {
+        "MULTI" | "DUAL" | "DUALAUDIO" | "DUAL AUDIO" => Some(Language::Multi),
+        "ENG" | "ENGLISH" => Some(Language::English),
+        "FRA" | "FR" | "FRENCH" | "TRUEFRENCH" | "VFF" | "VFQ" | "VF" => Some(Language::French),
+        "GER" | "GERMAN" | "DEU" | "DEUTSCH" => Some(Language::German),
+        "SPA" | "SPANISH" | "ESP" | "ESPANOL" | "CASTELLANO" => Some(Language::Spanish),
+        "ITA" | "ITALIAN" => Some(Language::Italian),
+        "RUS" | "RUSSIAN" => Some(Language::Russian),
+        "JAP" | "JAPANESE" | "JPN" => Some(Language::Japanese),
+        "KOR" | "KOREAN" => Some(Language::Korean),
+        "CHI" | "CHINESE" => Some(Language::Chinese),
+        "POR" | "PORTUGUESE" => Some(Language::Portuguese),
+        "DUT" | "DUTCH" | "NLD" => Some(Language::Dutch),
+        "POL" | "POLISH" => Some(Language::Polish),
+        _ => None,
+    }
+}
+
+/// Parse language information from a torrent name.
+fn parse_language(name: &str) -> ParsedLanguage {
+    let mut result = ParsedLanguage::default();
+    let upper = name.to_uppercase();
+
+    // Check for hardcoded subs
+    result.hardcoded_subs = HARDCODED_SUBS_PATTERN.is_match(name);
+
+    // Special case: VOSTFR means French subtitles (VO = original version, ST = subtitled, FR = French)
+    // This is a subbed release, French goes to subtitles only
+    if upper.contains("VOSTFR") {
+        result.subtitles.push(Language::French);
+        return result; // VOSTFR releases typically don't specify audio language
+    }
+
+    // Check for generic subtitle indicators (SUBBED, SUB, SUBS)
+    // These indicate the release has subtitles but don't specify the language
+    let is_subbed_release = upper.contains("SUBBED")
+        || (upper.contains(".SUB.") || upper.contains(" SUB ") || upper.ends_with(" SUB"));
+
+    // Find all language matches
+    for cap in LANGUAGE_PATTERN.captures_iter(name) {
+        if let Some(m) = cap.get(1) {
+            let code = m.as_str();
+            if let Some(lang) = parse_language_code(code) {
+                // Multi/Dual always refers to audio tracks
+                if matches!(lang, Language::Multi) {
+                    if !result.audio.contains(&lang) {
+                        result.audio.push(lang);
+                    }
+                    continue;
+                }
+
+                // For subbed releases with a single language tag, it's ambiguous
+                // but typically the language refers to subtitles, not audio
+                // For non-subbed releases, language tags refer to audio
+                if is_subbed_release && result.audio.is_empty() {
+                    // First language in a subbed release - likely the subtitle language
+                    if !result.subtitles.contains(&lang) {
+                        result.subtitles.push(lang);
+                    }
+                } else {
+                    // Non-subbed release or additional languages - treat as audio
+                    if !result.audio.contains(&lang) {
+                        result.audio.push(lang);
+                    }
+                }
+            }
+        }
+    }
+
+    result
+}
 
 /// Parse format information from a torrent name.
 pub fn parse_format(name: &str) -> ParsedFormat {
@@ -234,6 +381,9 @@ pub fn parse_format(name: &str) -> ParsedFormat {
             }
         }
     }
+
+    // Parse language information
+    format.language = parse_language(name);
 
     format
 }
@@ -369,5 +519,95 @@ mod tests {
         assert_eq!(QualityTier::Cam.rank(), 0);
         assert_eq!(QualityTier::Remux.rank(), 9);
         assert_eq!(QualityTier::BluRay.rank(), 8);
+    }
+
+    // Language parsing tests
+    #[test]
+    fn test_parse_language_english() {
+        let format = parse_format("Movie.2024.1080p.BluRay.ENG.x264-GROUP");
+        assert!(format.language.audio.contains(&Language::English));
+    }
+
+    #[test]
+    fn test_parse_language_multi() {
+        let format = parse_format("Movie.2024.1080p.MULTI.BluRay.x264-GROUP");
+        assert!(format.language.audio.contains(&Language::Multi));
+    }
+
+    #[test]
+    fn test_parse_language_dual_audio() {
+        let format = parse_format("Movie.2024.1080p.BluRay.Dual.Audio.x264");
+        assert!(format.language.audio.contains(&Language::Multi));
+    }
+
+    #[test]
+    fn test_parse_language_french_vff() {
+        let format = parse_format("Movie.2024.1080p.VFF.BluRay.x264-GROUP");
+        assert!(format.language.audio.contains(&Language::French));
+    }
+
+    #[test]
+    fn test_parse_language_vostfr() {
+        let format = parse_format("Movie.2024.1080p.VOSTFR.BluRay.x264-GROUP");
+        assert!(format.language.subtitles.contains(&Language::French));
+        // VOSTFR means original audio with French subs - audio should be empty/unknown
+        assert!(format.language.audio.is_empty());
+    }
+
+    #[test]
+    fn test_parse_language_subbed() {
+        // SUBBED with a language tag - the language is likely the subtitle language
+        let format = parse_format("Movie.2024.1080p.SUBBED.Korean.WEB-DL.x264");
+        assert!(format.language.subtitles.contains(&Language::Korean));
+    }
+
+    #[test]
+    fn test_parse_language_truefrench() {
+        let format = parse_format("Movie.2024.1080p.TRUEFRENCH.BluRay.x264-GROUP");
+        assert!(format.language.audio.contains(&Language::French));
+    }
+
+    #[test]
+    fn test_parse_language_hardcoded_subs() {
+        let format = parse_format("Movie.2024.1080p.HC.BluRay.x264-GROUP");
+        assert!(format.language.hardcoded_subs);
+    }
+
+    #[test]
+    fn test_parse_language_german() {
+        let format = parse_format("Movie.2024.1080p.German.BluRay.x264-GROUP");
+        assert!(format.language.audio.contains(&Language::German));
+    }
+
+    #[test]
+    fn test_parse_language_japanese() {
+        let format = parse_format("Anime.2024.1080p.JPN.BluRay.x264");
+        assert!(format.language.audio.contains(&Language::Japanese));
+    }
+
+    #[test]
+    fn test_parse_language_korean() {
+        let format = parse_format("Movie.2024.1080p.Korean.WEB-DL.x264");
+        assert!(format.language.audio.contains(&Language::Korean));
+    }
+
+    #[test]
+    fn test_parse_language_italian() {
+        let format = parse_format("Movie.2024.1080p.ITA.BluRay.x264");
+        assert!(format.language.audio.contains(&Language::Italian));
+    }
+
+    #[test]
+    fn test_parse_language_spanish() {
+        let format = parse_format("Movie.2024.1080p.Spanish.BluRay.x264");
+        assert!(format.language.audio.contains(&Language::Spanish));
+    }
+
+    #[test]
+    fn test_parse_language_no_language() {
+        let format = parse_format("Movie.2024.1080p.BluRay.x264-GROUP");
+        assert!(format.language.audio.is_empty());
+        assert!(format.language.subtitles.is_empty());
+        assert!(!format.language.hardcoded_subs);
     }
 }
