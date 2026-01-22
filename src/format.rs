@@ -26,7 +26,7 @@ pub enum Language {
 }
 
 /// Parsed language information from a torrent name.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ParsedLanguage {
     /// Detected audio languages
     pub audio: Vec<Language>,
@@ -176,7 +176,7 @@ static LANGUAGE_PATTERN: Lazy<Regex> = Lazy::new(|| {
             # English
             ENG(?:LISH)?|
             # French variants
-            FRA?(?:ENCH)?|VFF|VFQ|VF|FRENCH|TRUEFRENCH|
+            FR|FRA|FRENCH|TRUEFRENCH|VFF|VFQ|VF|
             # German
             GER(?:MAN)?|DEU(?:TSCH)?|
             # Spanish
@@ -211,7 +211,9 @@ static HARDCODED_SUBS_PATTERN: Lazy<Regex> = Lazy::new(|| {
 fn parse_language_code(code: &str) -> Option<Language> {
     let upper = code.to_uppercase();
     match upper.as_str() {
-        "MULTI" | "DUAL" | "DUALAUDIO" | "DUAL AUDIO" => Some(Language::Multi),
+        "MULTI" | "DUAL" | "DUALAUDIO" | "DUAL AUDIO" | "MULTISUBS" | "MULTI.SUBS" => {
+            Some(Language::Multi)
+        }
         "ENG" | "ENGLISH" => Some(Language::English),
         "FRA" | "FR" | "FRENCH" | "TRUEFRENCH" | "VFF" | "VFQ" | "VF" => Some(Language::French),
         "GER" | "GERMAN" | "DEU" | "DEUTSCH" => Some(Language::German),
@@ -262,8 +264,10 @@ fn parse_language(name: &str) -> ParsedLanguage {
                 }
 
                 // For subbed releases with a single language tag, it's ambiguous
-                // but typically the language refers to subtitles, not audio
-                // For non-subbed releases, language tags refer to audio
+                // but typically the language refers to subtitles, not audio.
+                // For non-subbed releases, language tags refer to audio.
+                // Note: In SUBBED releases with multiple languages (e.g., "Movie.SUBBED.ENG.FRA"),
+                // only the first language is treated as subtitle; subsequent languages go to audio.
                 if is_subbed_release && result.audio.is_empty() {
                     // First language in a subbed release - likely the subtitle language
                     if !result.subtitles.contains(&lang) {
@@ -609,5 +613,20 @@ mod tests {
         assert!(format.language.audio.is_empty());
         assert!(format.language.subtitles.is_empty());
         assert!(!format.language.hardcoded_subs);
+    }
+
+    #[test]
+    fn test_parse_language_multiple_languages() {
+        // Multiple language tags should all be captured as audio
+        let format = parse_format("Movie.2024.1080p.ENG.ITA.BluRay.x264");
+        assert!(format.language.audio.contains(&Language::English));
+        assert!(format.language.audio.contains(&Language::Italian));
+        assert_eq!(format.language.audio.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_language_multisubs() {
+        let format = parse_format("Movie.2024.1080p.MULTISUBS.BluRay.x264");
+        assert!(format.language.audio.contains(&Language::Multi));
     }
 }
