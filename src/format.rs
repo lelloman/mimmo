@@ -11,6 +11,8 @@ use regex::Regex;
 pub enum Language {
     English,
     French,
+    FrenchVFF,
+    FrenchVFQ,
     German,
     Spanish,
     Italian,
@@ -21,6 +23,16 @@ pub enum Language {
     Portuguese,
     Dutch,
     Polish,
+    Swedish,
+    Danish,
+    Norwegian,
+    Finnish,
+    Hindi,
+    Thai,
+    Czech,
+    Hungarian,
+    Romanian,
+    Ukrainian,
     /// Multi-language release
     Multi,
 }
@@ -34,6 +46,8 @@ pub struct ParsedLanguage {
     pub subtitles: Vec<Language>,
     /// Whether hardcoded subtitles were detected
     pub hardcoded_subs: bool,
+    /// Whether forced subtitles were detected
+    pub forced: bool,
 }
 
 /// Video resolution.
@@ -196,7 +210,27 @@ static LANGUAGE_PATTERN: Lazy<Regex> = Lazy::new(|| {
             # Dutch
             DUT(?:CH)?|NLD|
             # Polish
-            POL(?:ISH)?
+            POL(?:ISH)?|
+            # Swedish
+            SWE(?:DISH)?|
+            # Danish
+            DAN(?:ISH)?|
+            # Norwegian
+            NOR(?:WEGIAN)?|
+            # Finnish
+            FIN(?:NISH)?|
+            # Hindi
+            HIN(?:DI)?|
+            # Thai
+            THA(?:I)?|
+            # Czech
+            CZE(?:CH)?|
+            # Hungarian
+            HUN(?:GARIAN)?|
+            # Romanian
+            RON|ROU|ROMANIAN|
+            # Ukrainian
+            UKR(?:AINIAN)?
         )\b",
     )
     .unwrap()
@@ -207,6 +241,14 @@ static HARDCODED_SUBS_PATTERN: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?ix)\b(HC|HARDCODED|HARDSUB)\b").unwrap()
 });
 
+static FORCED_SUBS_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)\b(FORCED)\b").unwrap()
+});
+
+static SUBTITLE_LANGUAGE_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)\b(?:VOSTFR|SUB(?:TITLES?)?)\.([A-Z]{2,3})\b").unwrap()
+});
+
 /// Map a language code/name to the Language enum.
 fn parse_language_code(code: &str) -> Option<Language> {
     let upper = code.to_uppercase();
@@ -215,7 +257,9 @@ fn parse_language_code(code: &str) -> Option<Language> {
             Some(Language::Multi)
         }
         "ENG" | "ENGLISH" => Some(Language::English),
-        "FRA" | "FR" | "FRENCH" | "TRUEFRENCH" | "VFF" | "VFQ" | "VF" => Some(Language::French),
+        "FRA" | "FR" | "FRENCH" | "TRUEFRENCH" | "VF" => Some(Language::French),
+        "VFF" => Some(Language::FrenchVFF),
+        "VFQ" => Some(Language::FrenchVFQ),
         "GER" | "GERMAN" | "DEU" | "DEUTSCH" => Some(Language::German),
         "SPA" | "SPANISH" | "ESP" | "ESPANOL" | "CASTELLANO" => Some(Language::Spanish),
         "ITA" | "ITALIAN" => Some(Language::Italian),
@@ -226,6 +270,16 @@ fn parse_language_code(code: &str) -> Option<Language> {
         "POR" | "PORTUGUESE" => Some(Language::Portuguese),
         "DUT" | "DUTCH" | "NLD" => Some(Language::Dutch),
         "POL" | "POLISH" => Some(Language::Polish),
+        "SWE" | "SWEDISH" => Some(Language::Swedish),
+        "DAN" | "DANISH" => Some(Language::Danish),
+        "NOR" | "NORWEGIAN" => Some(Language::Norwegian),
+        "FIN" | "FINNISH" => Some(Language::Finnish),
+        "HIN" | "HINDI" => Some(Language::Hindi),
+        "THA" | "THAI" => Some(Language::Thai),
+        "CZE" | "CZECH" => Some(Language::Czech),
+        "HUN" | "HUNGARIAN" => Some(Language::Hungarian),
+        "RON" | "ROU" | "ROMANIAN" => Some(Language::Romanian),
+        "UKR" | "UKRAINIAN" => Some(Language::Ukrainian),
         _ => None,
     }
 }
@@ -238,11 +292,25 @@ fn parse_language(name: &str) -> ParsedLanguage {
     // Check for hardcoded subs
     result.hardcoded_subs = HARDCODED_SUBS_PATTERN.is_match(name);
 
+    // Check for forced subs
+    result.forced = FORCED_SUBS_PATTERN.is_match(name);
+
     // Special case: VOSTFR means French subtitles (VO = original version, ST = subtitled, FR = French)
     // This is a subbed release, French goes to subtitles only
     if upper.contains("VOSTFR") {
         result.subtitles.push(Language::French);
         return result; // VOSTFR releases typically don't specify audio language
+    }
+
+    // Check for explicit subtitle language patterns (e.g., SUB.ENG, SUBTITLES.FRA)
+    for cap in SUBTITLE_LANGUAGE_PATTERN.captures_iter(name) {
+        if let Some(m) = cap.get(1) {
+            if let Some(lang) = parse_language_code(m.as_str()) {
+                if !result.subtitles.contains(&lang) {
+                    result.subtitles.push(lang);
+                }
+            }
+        }
     }
 
     // Check for generic subtitle indicators (SUBBED, SUB, SUBS)
@@ -263,15 +331,12 @@ fn parse_language(name: &str) -> ParsedLanguage {
                     continue;
                 }
 
-                // For subbed releases with a single language tag, it's ambiguous
-                // but typically the language refers to subtitles, not audio.
-                // For non-subbed releases, language tags refer to audio.
-                // Note: In SUBBED releases with multiple languages (e.g., "Movie.SUBBED.ENG.FRA"),
-                // only the first language is treated as subtitle; subsequent languages go to audio.
-                if is_subbed_release && result.audio.is_empty() {
-                    // First language in a subbed release - likely the subtitle language
-                    if !result.subtitles.contains(&lang) {
-                        result.subtitles.push(lang);
+                // For subbed releases with a single language tag, it's ambiguous.
+                // We now assume audio, unless no other language is present.
+                if is_subbed_release && result.subtitles.is_empty() && result.audio.is_empty() {
+                    // First language in a subbed release - could be audio or subtitle
+                    if !result.audio.contains(&lang) {
+                        result.audio.push(lang);
                     }
                 } else {
                     // Non-subbed release or additional languages - treat as audio
@@ -540,14 +605,20 @@ mod tests {
 
     #[test]
     fn test_parse_language_dual_audio() {
-        let format = parse_format("Movie.2024.1080p.BluRay.Dual.Audio.x264");
+        let format = parse_format("Movie.2024.1080p.BluRay.Dual.Audio.x24");
         assert!(format.language.audio.contains(&Language::Multi));
     }
 
     #[test]
     fn test_parse_language_french_vff() {
         let format = parse_format("Movie.2024.1080p.VFF.BluRay.x264-GROUP");
-        assert!(format.language.audio.contains(&Language::French));
+        assert!(format.language.audio.contains(&Language::FrenchVFF));
+    }
+
+    #[test]
+    fn test_parse_language_french_vfq() {
+        let format = parse_format("Movie.2024.1080p.VFQ.BluRay.x264-GROUP");
+        assert!(format.language.audio.contains(&Language::FrenchVFQ));
     }
 
     #[test]
@@ -560,9 +631,9 @@ mod tests {
 
     #[test]
     fn test_parse_language_subbed() {
-        // SUBBED with a language tag - the language is likely the subtitle language
+        // SUBBED with a language tag - the language is likely the audio language
         let format = parse_format("Movie.2024.1080p.SUBBED.Korean.WEB-DL.x264");
-        assert!(format.language.subtitles.contains(&Language::Korean));
+        assert!(format.language.audio.contains(&Language::Korean));
     }
 
     #[test]
@@ -575,6 +646,12 @@ mod tests {
     fn test_parse_language_hardcoded_subs() {
         let format = parse_format("Movie.2024.1080p.HC.BluRay.x264-GROUP");
         assert!(format.language.hardcoded_subs);
+    }
+
+    #[test]
+    fn test_parse_language_forced_subs() {
+        let format = parse_format("Movie.2024.1080p.FORCED.BluRay.x264-GROUP");
+        assert!(format.language.forced);
     }
 
     #[test]
@@ -628,5 +705,30 @@ mod tests {
     fn test_parse_language_multisubs() {
         let format = parse_format("Movie.2024.1080p.MULTISUBS.BluRay.x264");
         assert!(format.language.audio.contains(&Language::Multi));
+    }
+
+    #[test]
+    fn test_parse_language_explicit_subtitle() {
+        // Explicit subtitle language pattern (SUB.XX or SUBTITLES.XX)
+        let format = parse_format("Movie.2024.1080p.SUB.ENG.BluRay.x264");
+        assert!(format.language.subtitles.contains(&Language::English));
+    }
+
+    #[test]
+    fn test_parse_language_swedish() {
+        let format = parse_format("Movie.2024.1080p.SWE.BluRay.x264");
+        assert!(format.language.audio.contains(&Language::Swedish));
+    }
+
+    #[test]
+    fn test_parse_language_hindi() {
+        let format = parse_format("Movie.2024.1080p.HINDI.WEB-DL.x264");
+        assert!(format.language.audio.contains(&Language::Hindi));
+    }
+
+    #[test]
+    fn test_parse_language_romanian() {
+        let format = parse_format("Movie.2024.1080p.ROMANIAN.BluRay.x264");
+        assert!(format.language.audio.contains(&Language::Romanian));
     }
 }
