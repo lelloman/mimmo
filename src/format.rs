@@ -78,6 +78,11 @@ pub enum AudioCodec {
     TrueHD,
     Atmos,
     FLAC,
+    // Music-specific codecs
+    MP3,
+    Opus,
+    Vorbis,
+    WMA,
 }
 
 /// Quality tier ranking (ordered from lowest to highest quality).
@@ -132,6 +137,10 @@ pub struct ParsedFormat {
     pub season: Option<u16>,
     pub episode: Option<u16>,
     pub language: ParsedLanguage,
+    /// Audio bitrate in kbps (for music releases)
+    pub audio_bitrate_kbps: Option<u32>,
+    /// VBR quality indicator (e.g., "V0", "V2")
+    pub audio_vbr_quality: Option<String>,
 }
 
 // Regex patterns
@@ -144,7 +153,16 @@ static VIDEO_CODEC_PATTERN: Lazy<Regex> = Lazy::new(|| {
 });
 
 static AUDIO_CODEC_PATTERN: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\b(AAC|AC3|DD5\.?1|DTS-HD(?:[\.-]?MA)?|DTS|TrueHD|Atmos|FLAC)\b").unwrap()
+    Regex::new(r"(?i)\b(AAC|AC3|DD5\.?1|DTS-HD(?:[\.-]?MA)?|DTS|TrueHD|Atmos|FLAC|MP3|OGG|VORBIS|OPUS|WMA)\b").unwrap()
+});
+
+// Music bitrate patterns
+static AUDIO_BITRATE_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)\b(320|256|192|128|96|64)\s*(?:kbps|kbs|kb/s)?\b").unwrap()
+});
+
+static AUDIO_VBR_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)\b(V0|V1|V2|VBR)\b").unwrap()
 });
 
 static QUALITY_TIER_PATTERN: Lazy<Regex> = Lazy::new(|| {
@@ -393,9 +411,25 @@ pub fn parse_format(name: &str) -> ParsedFormat {
                 "TRUEHD" => Some(AudioCodec::TrueHD),
                 "ATMOS" => Some(AudioCodec::Atmos),
                 "FLAC" => Some(AudioCodec::FLAC),
+                "MP3" => Some(AudioCodec::MP3),
+                "OGG" | "VORBIS" => Some(AudioCodec::Vorbis),
+                "OPUS" => Some(AudioCodec::Opus),
+                "WMA" => Some(AudioCodec::WMA),
                 _ => None,
             }
         };
+    }
+
+    // Parse audio bitrate (for music releases)
+    if let Some(caps) = AUDIO_BITRATE_PATTERN.captures(name) {
+        if let Ok(bitrate) = caps.get(1).unwrap().as_str().parse::<u32>() {
+            format.audio_bitrate_kbps = Some(bitrate);
+        }
+    }
+
+    // Parse VBR quality
+    if let Some(caps) = AUDIO_VBR_PATTERN.captures(name) {
+        format.audio_vbr_quality = Some(caps.get(1).unwrap().as_str().to_uppercase());
     }
 
     // Parse quality tier
