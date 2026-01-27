@@ -33,3 +33,5 @@ training/bert-classifier-*/runs/
 training/bert-classifier-*/onnx/
 training/bert-classifier-*/final/
 models/
+training/nsfw_labeler.py
+training/train_nsfw_classifier.py
