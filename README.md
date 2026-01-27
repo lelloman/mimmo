@@ -2,7 +2,7 @@
 
 **Media Intelligence Metadata Modeling Outlet**
 
-A Rust library and CLI for torrent content classification and metadata extraction. Classifies torrents into media types (audio, video, software, book, other) with subcategory detection and extracts structured metadata (title, artist, year) for audio/video content.
+A Rust library and CLI for torrent content classification and metadata extraction. Classifies torrents into media types (audio, video, software, book, other) with subcategory detection, optional NSFW detection, and extracts structured metadata (title, artist, year) for audio/video content.
 
 Single binary (~309MB), no runtime dependencies, CPU inference via embedded ONNX + GGUF models.
 
@@ -44,6 +44,13 @@ echo "Game of Thrones S01 Complete 1080p" | mimmo
 mimmo -i
 ["torrent1", "torrent2", "torrent3"]
 # [{"medium":"audio",...},{"medium":"video",...},...]
+
+# NSFW detection (optional)
+mimmo --detect-nsfw "The.Matrix.1999.1080p.BluRay"
+# {"medium":"video",...,"nsfw":false,"nsfw_confidence":0.98,"nsfw_source":"ml"}
+
+mimmo --detect-nsfw "Brazzers.XXX.Scene.1080p"
+# {"medium":"video",...,"nsfw":true,"nsfw_confidence":0.95,"nsfw_source":"keywords"}
 ```
 
 ## Library Usage
@@ -100,11 +107,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     "title": "The Dark Side Of The Moon",
     "artist": "Pink Floyd",
     "year": 1973
-  }
+  },
+  "nsfw": false,
+  "nsfw_confidence": 0.98,
+  "nsfw_source": "ml"
 }
 ```
 
-The `metadata` field is only present for audio/video content.
+- `metadata` field is only present for audio/video content
+- `nsfw*` fields are only present when `--detect-nsfw` flag is used
 
 ## Classification
 
@@ -162,17 +173,25 @@ For audio and video content, structural analysis determines subcategory:
 - Model: [lelloman/smollm-torrent-metadata](https://huggingface.co/lelloman/smollm-torrent-metadata)
 - Inference: ~250ms per sample (CPU)
 
+### NSFW Classifier
+- BERT-tiny binary classifier (~17MB ONNX) embedded in binary
+- Base: `prajjwal1/bert-tiny`
+- Three-stage cascade: keywords → patterns → ML
+- Model: [lelloman/bert-torrent-nsfw](https://huggingface.co/lelloman/bert-torrent-nsfw)
+- Inference: <1ms (keywords/patterns), ~10ms (ML fallback)
+
 ## Building
 
 ```bash
 cargo build --release
 ```
 
-The build script automatically downloads both models from HuggingFace on first build:
+The build script automatically downloads all models from HuggingFace on first build:
 - BERT classifier (~17MB) from [lelloman/bert-torrent-classifier](https://huggingface.co/lelloman/bert-torrent-classifier)
 - SmolLM metadata extractor (~259MB) from [lelloman/smollm-torrent-metadata](https://huggingface.co/lelloman/smollm-torrent-metadata)
+- NSFW classifier (~17MB) from [lelloman/bert-torrent-nsfw](https://huggingface.co/lelloman/bert-torrent-nsfw)
 
-Both models are embedded in the binary at compile time using `include_bytes!`.
+All models are embedded in the binary at compile time using `include_bytes!`.
 
 ## Repository Structure
 
@@ -181,7 +200,8 @@ mimmo/
 ├── src/
 │   ├── lib.rs              # Library with public API
 │   ├── main.rs             # CLI binary
-│   ├── cascade/            # Classification cascade
+│   ├── cascade/            # Medium classification cascade
+│   ├── nsfw/               # NSFW detection cascade
 │   └── metadata.rs         # SmolLM metadata extraction
 ├── scripts/
 │   ├── train_smollm.py     # LLM fine-tuning

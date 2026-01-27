@@ -1,5 +1,6 @@
 use mimmo::cascade::{Cascade, Confidence, Medium, StageResult};
 use mimmo::metadata::MetadataExtractor;
+use mimmo::nsfw::{NsfwCascade, NsfwResult};
 use mimmo::{from_path, from_text, detect_subcategory, ContentInfo};
 use serde::Serialize;
 use std::io::{self, BufRead, Write};
@@ -24,9 +25,20 @@ struct JsonResult {
     source: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     metadata: Option<ExtractedMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nsfw: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nsfw_confidence: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nsfw_source: Option<&'static str>,
 }
 
-fn stage_result_to_json(r: &StageResult, info: &ContentInfo, extractor: Option<&MetadataExtractor>) -> JsonResult {
+fn stage_result_to_json(
+    r: &StageResult,
+    info: &ContentInfo,
+    extractor: Option<&MetadataExtractor>,
+    nsfw_result: Option<&NsfwResult>,
+) -> JsonResult {
     let confidence = match r.confidence {
         Confidence::High => 0.95,
         Confidence::Medium => 0.75,
@@ -60,12 +72,22 @@ fn stage_result_to_json(r: &StageResult, info: &ContentInfo, extractor: Option<&
         None
     };
 
+    // Extract NSFW fields if result is provided
+    let (nsfw, nsfw_confidence, nsfw_source) = if let Some(nr) = nsfw_result {
+        (Some(nr.nsfw), Some(nr.confidence), Some(nr.source.as_str()))
+    } else {
+        (None, None, None)
+    };
+
     JsonResult {
         medium,
         subcategory,
         confidence,
         source: r.source,
         metadata,
+        nsfw,
+        nsfw_confidence,
+        nsfw_source,
     }
 }
 
@@ -73,9 +95,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
 
     let interactive = args.iter().any(|a| a == "-i");
+    let detect_nsfw = args.iter().any(|a| a == "--detect-nsfw");
 
     if interactive {
-        return interactive_mode();
+        return interactive_mode(detect_nsfw);
     }
 
     // Get non-flag arguments
@@ -103,7 +126,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("   or: mimmo -i  (interactive JSON batch mode)");
         eprintln!();
         eprintln!("Options:");
-        eprintln!("  -i  Interactive JSON batch mode");
+        eprintln!("  -i            Interactive JSON batch mode");
+        eprintln!("  --detect-nsfw Enable NSFW detection");
         eprintln!();
         eprintln!("Supported inputs:");
         eprintln!("  - Directory path");
@@ -125,9 +149,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         from_text(&raw_input)
     };
 
-    // Classify
+    // Classify medium
     let cascade = Cascade::default_with_ml()?;
     let result = cascade.classify(&content_info)?;
+
+    // Run NSFW detection if requested
+    let nsfw_result = if detect_nsfw {
+        let nsfw_cascade = NsfwCascade::new()?;
+        Some(nsfw_cascade.classify(&content_info)?)
+    } else {
+        None
+    };
 
     // Create metadata extractor for audio/video
     let extractor = if matches!(result.medium, Medium::Audio | Medium::Video) {
@@ -136,7 +168,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    let json_result = stage_result_to_json(&result, &content_info, extractor.as_ref());
+    let json_result = stage_result_to_json(&result, &content_info, extractor.as_ref(), nsfw_result.as_ref());
 
     // Output JSON
     println!("{}", serde_json::to_string(&json_result)?);
@@ -144,9 +176,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn interactive_mode() -> Result<(), Box<dyn std::error::Error>> {
+fn interactive_mode(detect_nsfw: bool) -> Result<(), Box<dyn std::error::Error>> {
     let cascade = Cascade::default_with_ml()?;
     let extractor = MetadataExtractor::new().ok();
+    let nsfw_cascade = if detect_nsfw {
+        Some(NsfwCascade::new()?)
+    } else {
+        None
+    };
 
     let stdin = io::stdin();
     let mut stdout = io::stdout();
@@ -182,7 +219,14 @@ fn interactive_mode() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 None
             };
-            results.push(stage_result_to_json(&result, &content_info, ext_ref));
+
+            let nsfw_result = if let Some(ref nc) = nsfw_cascade {
+                Some(nc.classify(&content_info)?)
+            } else {
+                None
+            };
+
+            results.push(stage_result_to_json(&result, &content_info, ext_ref, nsfw_result.as_ref()));
         }
 
         // Output JSON array of results

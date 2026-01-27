@@ -52,6 +52,9 @@ pub mod format;
 // Metadata extraction using SmolLM
 pub mod metadata;
 
+// NSFW detection
+pub mod nsfw;
+
 mod error {
     use std::fmt;
 
@@ -119,6 +122,30 @@ const MAX_LENGTH: usize = 128;
 // Embed model files directly in the binary
 const MODEL_BYTES: &[u8] = include_bytes!("../models/bert/model_embedded.onnx");
 const TOKENIZER_JSON: &str = include_str!("../models/bert/tokenizer.json");
+
+/// NSFW model bytes embedded in binary
+pub const NSFW_MODEL_BYTES: &[u8] = include_bytes!("../models/bert-nsfw/model_embedded.onnx");
+
+// Shared tokenizer for NSFW and medium classification
+use once_cell::sync::OnceCell;
+use std::sync::Arc;
+
+static SHARED_TOKENIZER: OnceCell<Arc<Tokenizer>> = OnceCell::new();
+
+/// Get a shared tokenizer instance.
+///
+/// The tokenizer is lazily initialized and shared across all callers.
+/// This is useful for the NSFW cascade which can share the tokenizer
+/// with the medium classifier.
+pub fn get_shared_tokenizer() -> Result<Arc<Tokenizer>, Error> {
+    SHARED_TOKENIZER
+        .get_or_try_init(|| {
+            let tokenizer = Tokenizer::from_bytes(TOKENIZER_JSON.as_bytes())
+                .map_err(|e| Error::Tokenizer(e.to_string()))?;
+            Ok(Arc::new(tokenizer))
+        })
+        .cloned()
+}
 
 // Regex pattern for episode detection (S01E01, 1x01, etc)
 static EPISODE_PATTERN: Lazy<Regex> = Lazy::new(|| {

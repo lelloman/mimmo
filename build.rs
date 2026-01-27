@@ -4,6 +4,7 @@ use std::path::Path;
 
 const HF_BASE_SMOLLM: &str = "https://huggingface.co/lelloman/smollm-torrent-metadata/resolve/main";
 const HF_BASE_BERT: &str = "https://huggingface.co/lelloman/bert-torrent-classifier/resolve/main";
+const HF_BASE_BERT_NSFW: &str = "https://huggingface.co/lelloman/bert-torrent-nsfw/resolve/main";
 
 struct ModelFile {
     url: String,
@@ -25,6 +26,10 @@ fn main() {
         ModelFile {
             url: format!("{}/tokenizer.json", HF_BASE_BERT),
             path: "models/bert/tokenizer.json",
+        },
+        ModelFile {
+            url: format!("{}/model_embedded.onnx", HF_BASE_BERT_NSFW),
+            path: "models/bert-nsfw/model_embedded.onnx",
         },
     ];
 
